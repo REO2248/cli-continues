@@ -8,9 +8,10 @@ process.on('warning', (warning) => {
   }
 });
 
+import { createRequire } from 'node:module';
 import * as clack from '@clack/prompts';
 import { Command } from 'commander';
-import { createRequire } from 'module';
+import { getExtraCommandArgs } from './commands/_shared.js';
 import { listCommand } from './commands/list.js';
 import { interactivePick } from './commands/pick.js';
 import { resumeBySource } from './commands/quick-resume.js';
@@ -19,6 +20,18 @@ import { resumeCommand } from './commands/resume-cmd.js';
 import { scanCommand } from './commands/scan.js';
 import { setLogLevel } from './logger.js';
 import { ALL_TOOLS, adapters, SOURCE_HELP } from './parsers/registry.js';
+
+function splitTailArgs(args: string[]): { commandArgs: string[]; tailArgs: string[] } {
+  const separator = args.indexOf('--');
+  if (separator < 0) return { commandArgs: args, tailArgs: [] };
+  return {
+    commandArgs: args.slice(0, separator),
+    tailArgs: args.slice(separator + 1),
+  };
+}
+
+const rawUserArgs = process.argv.slice(2);
+const { commandArgs, tailArgs } = splitTailArgs(rawUserArgs);
 
 const program = new Command();
 const _require = createRequire(import.meta.url);
@@ -89,7 +102,7 @@ Short aliases:
 
 // Default command - Interactive TUI
 program.option('-a, --all', 'Show all sessions globally (skip directory filtering)').action(async (options) => {
-  await interactivePick({ all: options.all }, cliContext);
+  await interactivePick({ all: options.all, forwardArgs: tailArgs }, cliContext);
 });
 
 // Pick command (explicit TUI)
@@ -100,8 +113,11 @@ program
   .option('-a, --all', 'Show all sessions globally (skip directory filtering)')
   .option('--no-tui', 'Disable TUI, use plain text')
   .option('--rebuild', 'Force rebuild session index')
-  .action(async (options) => {
-    await interactivePick(options, cliContext);
+  .allowUnknownOption(true)
+  .allowExcessArguments(true)
+  .action(async (options, command: Command) => {
+    const rawForwardArgs = getExtraCommandArgs(command, 0);
+    await interactivePick({ ...options, forwardArgs: [...rawForwardArgs, ...tailArgs] }, cliContext);
   });
 
 // List sessions command
@@ -126,8 +142,11 @@ program
   .option('-i, --in <cli-tool>', `Target CLI tool (${ALL_TOOLS.join(', ')})`)
   .option('--reference', 'Use file reference instead of inline context (for very large sessions)')
   .option('--no-tui', 'Disable interactive prompts')
-  .action(async (sessionId, options) => {
-    await resumeCommand(sessionId, options, cliContext);
+  .allowUnknownOption(true)
+  .allowExcessArguments(true)
+  .action(async (sessionId, options, command: Command) => {
+    const rawForwardArgs = getExtraCommandArgs(command, 1);
+    await resumeCommand(sessionId, options, cliContext, { rawArgs: rawForwardArgs, tailArgs });
   });
 
 // Scan command
@@ -159,4 +178,4 @@ for (const tool of ALL_TOOLS) {
 }
 
 // Parse and run
-program.parse();
+program.parse([process.argv[0], process.argv[1], ...commandArgs]);

@@ -45,6 +45,15 @@ export type {
   UnifiedSession,
 } from './types/index.js';
 export { TOOL_NAMES } from './types/tool-names.js';
+export type {
+  CanonicalFlagKey,
+  FlagOccurrence,
+  ForwardMapResult,
+  ForwardResolution,
+  HandoffForwardingOptions,
+  ParsedForwardFlags,
+} from './utils/forward-flags.js';
+export { parseForwardFlags, resolveForwardingArgs } from './utils/forward-flags.js';
 // ── Session Operations ───────────────────────────────────────────────
 export {
   buildIndex,
@@ -68,5 +77,6 @@ export {
   getAvailableTools,
   getResumeCommand,
   nativeResume,
+  resolveCrossToolForwarding,
   resume,
 } from './utils/resume.js';

@@ -1,11 +1,28 @@
-import { spawn } from 'child_process';
-import * as fs from 'fs';
-import * as path from 'path';
+import { spawn } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { logger } from '../logger.js';
 import { ALL_TOOLS, adapters } from '../parsers/registry.js';
 import type { SessionContext, SessionSource, UnifiedSession } from '../types/index.js';
+import {
+  type ForwardResolution,
+  formatForwardArgs,
+  type HandoffForwardingOptions,
+  resolveTargetForwarding,
+} from './forward-flags.js';
 import { extractContext, saveContext } from './index.js';
 import { getSourceLabels } from './markdown.js';
+
+/**
+ * Resolve mapped + passthrough forward args for cross-tool launches.
+ */
+export function resolveCrossToolForwarding(
+  target: SessionSource,
+  options?: HandoffForwardingOptions,
+): ForwardResolution {
+  const adapter = adapters[target];
+  return resolveTargetForwarding(target, adapter?.mapHandoffFlags, options);
+}
 
 /**
  * Resume a session using native CLI commands
@@ -24,6 +41,7 @@ export async function crossToolResume(
   session: UnifiedSession,
   target: SessionSource,
   mode: 'inline' | 'reference' = 'inline',
+  forwarding?: HandoffForwardingOptions,
 ): Promise<void> {
   const context = await extractContext(session);
   const cwd = session.cwd || process.cwd();
@@ -44,7 +62,9 @@ export async function crossToolResume(
 
   const adapter = adapters[target];
   if (!adapter) throw new Error(`Unknown target: ${target}`);
-  await runCommand(adapter.binaryName, adapter.crossToolArgs(prompt, cwd), cwd);
+
+  const resolved = resolveCrossToolForwarding(target, forwarding);
+  await runCommand(adapter.binaryName, [...resolved.extraArgs, ...adapter.crossToolArgs(prompt, cwd)], cwd);
 }
 
 /**
@@ -92,6 +112,7 @@ export async function resume(
   session: UnifiedSession,
   target?: SessionSource,
   mode: 'inline' | 'reference' = 'inline',
+  forwarding?: HandoffForwardingOptions,
 ): Promise<void> {
   const actualTarget = target || session.source;
 
@@ -100,7 +121,7 @@ export async function resume(
     await nativeResume(session);
   } else {
     // Different tool - use cross-tool injection
-    await crossToolResume(session, actualTarget, mode);
+    await crossToolResume(session, actualTarget, mode, forwarding);
   }
 }
 
@@ -166,13 +187,18 @@ export async function getAvailableTools(): Promise<SessionSource[]> {
 /**
  * Get resume command for display purposes
  */
-export function getResumeCommand(session: UnifiedSession, target?: SessionSource): string {
+export function getResumeCommand(
+  session: UnifiedSession,
+  target?: SessionSource,
+  forwarding?: HandoffForwardingOptions,
+): string {
   const actualTarget = target || session.source;
 
   if (actualTarget === session.source) {
     return adapters[session.source].resumeCommandDisplay(session);
   }
 
-  // Cross-tool
-  return `continues resume ${session.id} --in ${actualTarget}`;
+  const resolved = resolveCrossToolForwarding(actualTarget, forwarding);
+  const suffix = resolved.extraArgs.length > 0 ? ` ${formatForwardArgs(resolved.extraArgs)}` : '';
+  return `continues resume ${session.id} --in ${actualTarget}${suffix}`;
 }

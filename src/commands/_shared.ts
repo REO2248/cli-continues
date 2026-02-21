@@ -1,4 +1,6 @@
 import * as clack from '@clack/prompts';
+import chalk from 'chalk';
+import type { Command } from 'commander';
 import { sourceColors } from '../display/format.js';
 import { ALL_TOOLS } from '../parsers/registry.js';
 import type { SessionSource, UnifiedSession } from '../types/index.js';
@@ -69,4 +71,42 @@ export async function checkSingleToolAutoResume(
     return true;
   }
   return false;
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Warn user about precedence remapping and give a brief countdown in TTY mode.
+ */
+export async function showForwardingWarnings(
+  warnings: string[],
+  context: { isTTY: boolean },
+  seconds = 5,
+): Promise<void> {
+  if (warnings.length === 0) return;
+
+  for (const warning of warnings) {
+    clack.log.warn(warning);
+  }
+
+  if (!context.isTTY || seconds <= 0) return;
+
+  for (let remaining = seconds; remaining >= 1; remaining -= 1) {
+    process.stdout.write(chalk.yellow(`\rContinuing in ${remaining}s... `));
+    await wait(1000);
+  }
+
+  process.stdout.write('\r');
+  process.stdout.write(' '.repeat(24));
+  process.stdout.write('\r');
+}
+
+/**
+ * Extract extra CLI args from commander command object.
+ * Used for forwarding unknown options to target CLI tools.
+ */
+export function getExtraCommandArgs(command: Command, processedArgCount: number): string[] {
+  return command.args.slice(processedArgCount);
 }

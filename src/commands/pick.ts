@@ -4,16 +4,17 @@ import { showBanner } from '../display/banner.js';
 import { formatSessionForSelect, sourceColors } from '../display/format.js';
 import { showNoSessionsHelp } from '../display/help.js';
 import type { SessionSource, UnifiedSession } from '../types/index.js';
+import type { HandoffForwardingOptions } from '../utils/forward-flags.js';
 import { getAllSessions, getSessionsBySource } from '../utils/index.js';
-import { getResumeCommand, nativeResume, resume } from '../utils/resume.js';
+import { getResumeCommand, nativeResume, resolveCrossToolForwarding, resume } from '../utils/resume.js';
 import { matchesCwd } from '../utils/slug.js';
-import { checkSingleToolAutoResume, selectTargetTool } from './_shared.js';
+import { checkSingleToolAutoResume, selectTargetTool, showForwardingWarnings } from './_shared.js';
 
 /**
  * Main interactive TUI command
  */
 export async function interactivePick(
-  options: { source?: string; noTui?: boolean; rebuild?: boolean; all?: boolean },
+  options: { source?: string; noTui?: boolean; rebuild?: boolean; all?: boolean; forwardArgs?: string[] },
   context: { isTTY: boolean; supportsColor: boolean; version: string },
 ): Promise<void> {
   try {
@@ -25,7 +26,7 @@ export async function interactivePick(
     }
 
     showBanner(context.version, context.supportsColor);
-    clack.intro(chalk.bold('continue') + chalk.cyan.bold('s') + chalk.gray(' \u2014 session picker'));
+    clack.intro(chalk.bold('continue') + chalk.cyan.bold('s') + chalk.gray(' — session picker'));
 
     const s = clack.spinner();
     s.start('Loading sessions...');
@@ -60,7 +61,7 @@ export async function interactivePick(
     if (cwdSessions.length === 1 && !options.source) {
       const session = cwdSessions[0];
       console.log(chalk.gray(`  Auto-selected the only matching session:`));
-      console.log('  ' + formatSessionForSelect(session));
+      console.log(`  ${formatSessionForSelect(session)}`);
       console.log();
 
       if (await checkSingleToolAutoResume(session, nativeResume)) return;
@@ -68,15 +69,23 @@ export async function interactivePick(
       const targetTool = await selectTargetTool(session, { excludeSource: false });
       if (!targetTool) return;
 
+      const forwarding: HandoffForwardingOptions | undefined =
+        targetTool !== session.source ? { tailArgs: options.forwardArgs } : undefined;
+
+      if (forwarding) {
+        const resolved = resolveCrossToolForwarding(targetTool, forwarding);
+        await showForwardingWarnings(resolved.warnings, context);
+      }
+
       console.log();
       clack.log.info(`Working directory: ${chalk.cyan(session.cwd)}`);
-      clack.log.info(`Command: ${chalk.cyan(getResumeCommand(session, targetTool))}`);
+      clack.log.info(`Command: ${chalk.cyan(getResumeCommand(session, targetTool, forwarding))}`);
       console.log();
       clack.log.step(`Handing off to ${targetTool}...`);
       clack.outro(`Launching ${targetTool}`);
 
       if (session.cwd) process.chdir(session.cwd);
-      await resume(session, targetTool);
+      await resume(session, targetTool, 'inline', forwarding);
       return;
     }
 
@@ -100,9 +109,9 @@ export async function interactivePick(
         // Select message conveys scope context
         let message: string;
         if (scope === 'cwd') {
-          message = `${dirName} \u2014 ${pool.length} session${pool.length !== 1 ? 's' : ''}`;
+          message = `${dirName} — ${pool.length} session${pool.length !== 1 ? 's' : ''}`;
         } else if (hasCwdSessions) {
-          message = `All sessions \u2014 ${pool.length} total`;
+          message = `All sessions — ${pool.length} total`;
         } else {
           message = `${pool.length} sessions across ${toolCount} tool${toolCount !== 1 ? 's' : ''}`;
         }
@@ -203,10 +212,18 @@ export async function interactivePick(
     const targetTool = await selectTargetTool(session);
     if (!targetTool) return;
 
+    const forwarding: HandoffForwardingOptions | undefined =
+      targetTool !== session.source ? { tailArgs: options.forwardArgs } : undefined;
+
+    if (forwarding) {
+      const resolved = resolveCrossToolForwarding(targetTool, forwarding);
+      await showForwardingWarnings(resolved.warnings, context);
+    }
+
     // Step 4: Show what will happen and resume
     console.log();
     clack.log.info(`Working directory: ${chalk.cyan(session.cwd)}`);
-    clack.log.info(`Command: ${chalk.cyan(getResumeCommand(session, targetTool))}`);
+    clack.log.info(`Command: ${chalk.cyan(getResumeCommand(session, targetTool, forwarding))}`);
     console.log();
 
     clack.log.step(`Handing off to ${targetTool}...`);
@@ -214,7 +231,7 @@ export async function interactivePick(
 
     // Change to session's working directory and resume
     if (session.cwd) process.chdir(session.cwd);
-    await resume(session, targetTool);
+    await resume(session, targetTool, 'inline', forwarding);
   } catch (error) {
     if (clack.isCancel(error)) {
       clack.cancel('Cancelled');
