@@ -8,85 +8,26 @@ process.on('warning', (warning) => {
   }
 });
 
-import { Command } from 'commander';
-import chalk from 'chalk';
 import * as clack from '@clack/prompts';
-import ora from 'ora';
-import type { UnifiedSession, SessionSource } from './types/index.js';
-import {
-  getAllSessions,
-  getSessionsBySource,
-  findSession,
-  formatSession,
-  buildIndex,
-  sessionsToJsonl,
-} from './utils/index.js';
-import {
-  resume,
-  nativeResume,
-  crossToolResume,
-  getAvailableTools,
-  getResumeCommand,
-} from './utils/resume.js';
-import { matchesCwd } from './utils/slug.js';
-import { adapters, ALL_TOOLS, SOURCE_HELP } from './parsers/registry.js';
+import { Command } from 'commander';
+import { createRequire } from 'module';
+import { listCommand } from './commands/list.js';
+import { interactivePick } from './commands/pick.js';
+import { resumeBySource } from './commands/quick-resume.js';
+import { rebuildCommand } from './commands/rebuild.js';
+import { resumeCommand } from './commands/resume-cmd.js';
+import { scanCommand } from './commands/scan.js';
+import { setLogLevel } from './logger.js';
+import { ALL_TOOLS, adapters, SOURCE_HELP } from './parsers/registry.js';
 
 const program = new Command();
-const VERSION = '2.7.0';
+const _require = createRequire(import.meta.url);
+const { version: VERSION } = _require('../package.json') as { version: string };
 
 // Detect TTY for interactive mode
-const isTTY = process.stdout.isTTY;
-
-// Color support detection
+const isTTY = !!process.stdout.isTTY;
 const supportsColor = !process.env.NO_COLOR && isTTY;
-
-/**
- * ASCII art banner with indigo→cyan gradient and highlighted 's' brand mark.
- * All letters are exactly 4 chars wide, 1-space separated, 3 rows.
- */
-function showBanner(): void {
-  if (!supportsColor) return;
-
-  // Letter glyphs: [top, mid, bot], each 4 chars wide
-  const glyphs: string[][] = [
-    ['█▀▀▀', '█   ', '▀▀▀▀'], // c
-    ['█▀▀█', '█  █', '▀▀▀▀'], // o
-    ['█▀▀▄', '█  █', '▀  ▀'], // n
-    ['▀██▀', ' ██ ', ' ▀▀ '], // t
-    [' ██ ', ' ██ ', ' ▀▀ '], // i
-    ['█▀▀▄', '█  █', '▀  ▀'], // n
-    ['█  █', '█  █', '▀▀▀▀'], // u
-    ['█▀▀█', '█▀▀ ', '▀▀▀▀'], // e
-    ['█▀▀▀', '▀▀▀█', '▀▀▀▀'], // s
-  ];
-
-  // Gradient: soft indigo → bright cyan, with 's' in bold mint
-  const colors = [
-    chalk.hex('#9b8ec9'), // c
-    chalk.hex('#8a9ed7'), // o
-    chalk.hex('#79aee5'), // n
-    chalk.hex('#68bef3'), // t
-    chalk.hex('#57ceff'), // i
-    chalk.hex('#4ad6ff'), // n
-    chalk.hex('#3cdeff'), // u
-    chalk.hex('#2ee6ff'), // e
-    chalk.hex('#00ffc8').bold, // s
-  ];
-
-  console.log();
-  for (let row = 0; row < 3; row++) {
-    let line = '  ';
-    for (let i = 0; i < glyphs.length; i++) {
-      line += colors[i](glyphs[i][row]);
-      if (i < glyphs.length - 1) line += ' ';
-    }
-    console.log(line);
-  }
-  console.log();
-  console.log('  ' + chalk.cyan('Session'.padEnd(10)) + chalk.gray('Resume any AI coding session, never lose context'));
-  console.log('  ' + chalk.cyan('Continue'.padEnd(10)) + chalk.gray(`v${VERSION} — cont <n> or continues <tool>`));
-  console.log();
-}
+const cliContext = { isTTY, supportsColor, version: VERSION };
 
 // Signal handling for graceful exits
 let isExiting = false;
@@ -111,334 +52,25 @@ process.on('SIGTERM', () => {
 });
 
 /**
- * Source-specific colors for consistent branding — derived from the adapter registry
- */
-const sourceColors = Object.fromEntries(
-  Object.values(adapters).map(a => [a.name, a.color])
-) as Record<SessionSource, (s: string) => string>;
-
-/**
- * Format session with colors in columnar layout
- * Format: [source]  YYYY-MM-DD HH:MM  project-name  summary...  short-id
- */
-function formatSessionColored(session: UnifiedSession): string {
-  const colorFn = sourceColors[session.source] || chalk.white;
-  const tag = `[${session.source}]`;
-  const source = colorFn(tag.padEnd(10));
-  
-  const date = chalk.gray(session.updatedAt.toISOString().slice(0, 16).replace('T', ' '));
-  
-  // Show repo or last folder of cwd
-  const repoDisplay = session.repo || session.cwd.split('/').slice(-2).join('/') || '';
-  const repo = chalk.cyan(repoDisplay.slice(0, 20).padEnd(20));
-  
-  // Summary - truncate nicely
-  const summaryText = session.summary || '(no summary)';
-  const summary = (session.summary ? chalk.white(summaryText.slice(0, 44)) : chalk.gray(summaryText)).padEnd(44);
-  
-  // Short ID
-  const id = chalk.gray(session.id.slice(0, 8));
-  
-  return `${source} ${date}  ${repo}  ${summary}  ${id}`;
-}
-
-/**
- * Format session for clack select - simpler, cleaner
- */
-function formatSessionForSelect(session: UnifiedSession): string {
-  const colorFn = sourceColors[session.source] || chalk.white;
-  const tag = `[${session.source}]`;
-  const source = colorFn(tag.padEnd(10));
-  const date = session.updatedAt.toISOString().slice(0, 16).replace('T', ' ');
-  const repoDisplay = session.repo || session.cwd.split('/').slice(-1)[0] || '';
-  const summary = (session.summary || '(no summary)').slice(0, 48);
-  
-  return `${source}  ${date}  ${chalk.cyan(repoDisplay.padEnd(20))}  ${summary}`;
-}
-
-/**
- * Show helpful error when no sessions found
- */
-function showNoSessionsHelp(): void {
-  clack.log.error('No sessions found.');
-  console.log();
-  console.log(chalk.gray('Sessions are stored in:'));
-  for (const a of Object.values(adapters)) {
-    console.log(chalk.gray(`  ${a.storagePath}`));
-  }
-}
-
-/**
- * Main interactive TUI command
- */
-async function interactivePick(options: { source?: string; noTui?: boolean; rebuild?: boolean; all?: boolean }): Promise<void> {
-  try {
-    // If not TTY or --no-tui, fall back to list
-    if (!isTTY || options.noTui) {
-      console.log(chalk.yellow('Interactive mode requires a TTY. Use "continues list" instead.'));
-      process.exitCode = 1;
-      return;
-    }
-
-    showBanner();
-    clack.intro(chalk.bold('continue') + chalk.cyan.bold('s') + chalk.gray(' — session picker'));
-
-    const s = clack.spinner();
-    s.start('Loading sessions...');
-    
-    let sessions: UnifiedSession[];
-    if (options.source) {
-      sessions = await getSessionsBySource(options.source as SessionSource, options.rebuild);
-    } else {
-      sessions = await getAllSessions(options.rebuild);
-    }
-
-    s.stop();
-
-    if (sessions.length === 0) {
-      showNoSessionsHelp();
-      clack.outro(chalk.gray('No sessions to resume'));
-      return;
-    }
-
-    // Check for sessions matching current working directory (includes subdirectories)
-    const currentDir = process.cwd();
-    const cwdSessions = options.all ? [] : sessions.filter(sess => matchesCwd(sess.cwd, currentDir));
-    const hasCwdSessions = cwdSessions.length > 0;
-
-    const dirName = currentDir.split('/').pop() || currentDir;
-
-    if (!options.all && !hasCwdSessions && sessions.length > 0) {
-      clack.log.info(chalk.gray(`No sessions in ${dirName}, showing all`));
-    }
-
-    // Auto-resume: if exactly 1 session matches cwd, skip picker
-    if (cwdSessions.length === 1 && !options.source) {
-      const session = cwdSessions[0];
-      console.log(chalk.gray(`  Auto-selected the only matching session:`));
-      console.log('  ' + formatSessionForSelect(session));
-      console.log();
-
-      const availableTools = await getAvailableTools();
-      const targetOptions = availableTools
-        .map(t => ({
-          value: t,
-          label: t === session.source
-            ? `${sourceColors[t](t.charAt(0).toUpperCase() + t.slice(1))} (native resume)`
-            : `${sourceColors[t](t.charAt(0).toUpperCase() + t.slice(1))}`,
-        }));
-
-      if (targetOptions.length === 0) {
-        clack.log.warn('No CLI tools found. Install at least one AI coding CLI.');
-        return;
-      }
-
-      // If only the source tool is available, auto-resume natively
-      if (availableTools.length === 1 && availableTools[0] === session.source) {
-        clack.log.step(`Resuming natively in ${sourceColors[session.source](session.source)}...`);
-        clack.outro(`Launching ${session.source}`);
-        if (session.cwd) if (session.cwd) process.chdir(session.cwd);
-        await nativeResume(session);
-        return;
-      }
-
-      const targetTool = await clack.select({
-        message: `Continue ${sourceColors[session.source](session.source)} session in:`,
-        options: targetOptions,
-        initialValue: session.source,
-      }) as SessionSource;
-
-      if (clack.isCancel(targetTool)) {
-        clack.cancel('Cancelled');
-        return;
-      }
-
-      console.log();
-      clack.log.info(`Working directory: ${chalk.cyan(session.cwd)}`);
-      clack.log.info(`Command: ${chalk.cyan(getResumeCommand(session, targetTool))}`);
-      console.log();
-      clack.log.step(`Handing off to ${targetTool}...`);
-      clack.outro(`Launching ${targetTool}`);
-
-      if (session.cwd) if (session.cwd) process.chdir(session.cwd);
-      await resume(session, targetTool);
-      return;
-    }
-
-    // Step 1: Filter by CLI tool (optional) — skip if source already specified
-    let filteredSessions = hasCwdSessions ? cwdSessions : sessions;
-
-    if (!options.source && sessions.length > 0) {
-      let scope: 'cwd' | 'all' = hasCwdSessions ? 'cwd' : 'all';
-
-      while (true) {
-        const pool = scope === 'cwd' ? cwdSessions : sessions;
-        const bySource = pool.reduce((acc, s) => {
-          acc[s.source] = (acc[s.source] || 0) + 1;
-          return acc;
-        }, {} as Record<string, number>);
-        const toolCount = Object.keys(bySource).length;
-
-        // Select message conveys scope context
-        let message: string;
-        if (scope === 'cwd') {
-          message = `${dirName} — ${pool.length} session${pool.length !== 1 ? 's' : ''}`;
-        } else if (hasCwdSessions) {
-          message = `All sessions — ${pool.length} total`;
-        } else {
-          message = `${pool.length} sessions across ${toolCount} tool${toolCount !== 1 ? 's' : ''}`;
-        }
-
-        // Build options: tool names first, then "All tools", then scope toggle
-        const filterOptions: { value: string; label: string; hint?: string }[] = [];
-
-        // Per-tool options (sorted by count desc, colored)
-        filterOptions.push(
-          ...Object.entries(bySource)
-            .sort((a, b) => b[1] - a[1])
-            .map(([source, count]) => ({
-              value: source,
-              label: `${sourceColors[source as SessionSource](source.charAt(0).toUpperCase() + source.slice(1))} (${count})`,
-            })),
-        );
-
-        // "All tools" — no tool filter, shows all sessions in current scope
-        filterOptions.push({
-          value: 'all-in-scope',
-          label: `All tools (${pool.length})`,
-        });
-
-        // Scope toggle (only when CWD sessions exist and --all wasn't used)
-        if (hasCwdSessions && !options.all) {
-          if (scope === 'cwd') {
-            filterOptions.push({
-              value: 'scope-toggle',
-              label: chalk.dim(`Show all sessions (${sessions.length})`),
-            });
-          } else {
-            filterOptions.push({
-              value: 'scope-toggle',
-              label: chalk.dim(`This directory (${cwdSessions.length})`),
-            });
-          }
-        }
-
-        const toolFilter = await clack.select({
-          message,
-          options: filterOptions,
-          initialValue: 'all-in-scope',
-        });
-
-        if (clack.isCancel(toolFilter)) {
-          clack.cancel('Cancelled');
-          return;
-        }
-
-        // Scope toggle: flip and re-render
-        if (toolFilter === 'scope-toggle') {
-          scope = scope === 'cwd' ? 'all' : 'cwd';
-          continue;
-        }
-
-        // "All tools": use entire pool
-        if (toolFilter === 'all-in-scope') {
-          filteredSessions = pool;
-          break;
-        }
-
-        // Specific tool: filter by source
-        filteredSessions = pool.filter(s => s.source === toolFilter);
-        break;
-      }
-    }
-
-    // Step 2: Select session — show all with scrolling (maxItems controls viewport)
-    const PAGE_SIZE = 500;
-    const sessionOptions = filteredSessions.slice(0, PAGE_SIZE).map(s => ({
-      value: s,
-      label: formatSessionForSelect(s),
-      hint: s.id.slice(0, 8),
-    }));
-
-    if (filteredSessions.length > PAGE_SIZE) {
-      clack.log.info(chalk.gray(`Showing first ${PAGE_SIZE} of ${filteredSessions.length} sessions. Use --source to narrow results.`));
-    }
-
-    const selectedSession = await clack.select({
-      message: `Select a session (${filteredSessions.length} available)`,
-      options: sessionOptions,
-      maxItems: 15,
-    });
-
-    if (clack.isCancel(selectedSession)) {
-      clack.cancel('Cancelled');
-      return;
-    }
-
-    const session = selectedSession as UnifiedSession;
-
-    // Step 3: Select target tool
-    const availableTools = await getAvailableTools();
-    
-    const targetOptions = availableTools
-        .filter(t => t !== session.source)
-        .map(t => ({
-          value: t,
-          label: `${sourceColors[t](t.charAt(0).toUpperCase() + t.slice(1))}`,
-        }));
-
-    if (targetOptions.length === 0) {
-      const missing = ALL_TOOLS.filter(t => !availableTools.includes(t)).map(t => t.charAt(0).toUpperCase() + t.slice(1));
-      clack.log.warn(`Only ${sourceColors[session.source](session.source)} is installed. Install at least one more (${missing.join(', ')}) to enable cross-tool handoff.`);
-      return;
-    }
-
-    const targetTool = await clack.select({
-      message: `Continue ${sourceColors[session.source](session.source)} session in:`,
-      options: targetOptions,
-    }) as SessionSource;
-
-    if (clack.isCancel(targetTool)) {
-      clack.cancel('Cancelled');
-      return;
-    }
-
-    // Step 4: Show what will happen and resume
-    console.log();
-    clack.log.info(`Working directory: ${chalk.cyan(session.cwd)}`);
-    
-    const messageCount = (session as any).messageCount || '?';
-    const fileCount = (session as any).filesModified?.length || '?';
-    clack.log.info(`Context: ${messageCount} messages, ${fileCount} files modified`);
-    clack.log.info(`Command: ${chalk.cyan(getResumeCommand(session, targetTool))}`);
-    console.log();
-
-    clack.log.step(`Handing off to ${targetTool}...`);
-    clack.outro(`Launching ${targetTool}`);
-
-    // Change to session's working directory and resume
-    if (session.cwd) process.chdir(session.cwd);
-    await resume(session, targetTool);
-
-  } catch (error) {
-    if (clack.isCancel(error)) {
-      clack.cancel('Cancelled');
-      return;
-    }
-    clack.log.error(`${(error as Error).message}`);
-    process.exitCode = 1;
-  }
-}
-
-/**
  * Configure CLI program
  */
 program
   .name('continues')
-  .description('Never lose context. Resume any AI coding session across Claude, Copilot, Gemini, Codex, OpenCode, Droid & Cursor.')
+  .description(
+    'Never lose context. Resume any AI coding session across Claude, Copilot, Gemini, Codex, OpenCode, Droid & Cursor.',
+  )
   .version(VERSION)
+  .option('--verbose', 'Show info-level logs')
+  .option('--debug', 'Show debug-level logs')
   .helpOption('-h, --help', 'Display help for command')
-  .addHelpText('after', `
+  .hook('preAction', () => {
+    const opts = program.opts();
+    if (opts.debug) setLogLevel('debug');
+    else if (opts.verbose) setLogLevel('info');
+  })
+  .addHelpText(
+    'after',
+    `
 Examples:
   $ continues                      # Interactive TUI picker
   $ continues list                 # List all sessions
@@ -452,20 +84,15 @@ Short aliases:
   cont (binary alias)
   ls   -> list
   r    -> resume
-`);
+`,
+  );
 
-/**
- * Default command - Interactive TUI
- */
-program
-  .option('-a, --all', 'Show all sessions globally (skip directory filtering)')
-  .action(async (options) => {
-    await interactivePick({ all: options.all });
-  });
+// Default command - Interactive TUI
+program.option('-a, --all', 'Show all sessions globally (skip directory filtering)').action(async (options) => {
+  await interactivePick({ all: options.all }, cliContext);
+});
 
-/**
- * Pick command (explicit TUI)
- */
+// Pick command (explicit TUI)
 program
   .command('pick')
   .description('Interactive session picker (TUI mode)')
@@ -474,12 +101,10 @@ program
   .option('--no-tui', 'Disable TUI, use plain text')
   .option('--rebuild', 'Force rebuild session index')
   .action(async (options) => {
-    await interactivePick(options);
+    await interactivePick(options, cliContext);
   });
 
-/**
- * List sessions command
- */
+// List sessions command
 program
   .command('list')
   .alias('ls')
@@ -490,59 +115,10 @@ program
   .option('--jsonl', 'Output as JSONL')
   .option('--rebuild', 'Force rebuild session index')
   .action(async (options) => {
-    try {
-      // Use simple spinner for non-interactive
-      const spinner = isTTY && !options.json && !options.jsonl 
-        ? ora('Loading sessions...').start() 
-        : null;
-      
-      let sessions: UnifiedSession[];
-      if (options.source) {
-        sessions = await getSessionsBySource(options.source as SessionSource, options.rebuild);
-      } else {
-        sessions = await getAllSessions(options.rebuild);
-      }
-
-      if (spinner) spinner.stop();
-
-      const limit = parseInt(options.limit, 10);
-      const displaySessions = sessions.slice(0, limit);
-
-      if (options.json) {
-        console.log(JSON.stringify(displaySessions, null, 2));
-        return;
-      }
-
-      if (options.jsonl) {
-        console.log(sessionsToJsonl(displaySessions));
-        return;
-      }
-
-      if (sessions.length === 0) {
-        if (isTTY) {
-          showNoSessionsHelp();
-        } else {
-          console.log('No sessions found.');
-        }
-        return;
-      }
-
-      // Print header
-      console.log(chalk.gray(`Found ${sessions.length} sessions (showing ${displaySessions.length}):`));
-      console.log();
-
-      for (const session of displaySessions) {
-        console.log(formatSessionColored(session));
-      }
-    } catch (error) {
-      console.error(chalk.red('Error:'), (error as Error).message);
-      process.exitCode = 1;
-    }
+    await listCommand(options, cliContext);
   });
 
-/**
- * Resume a specific session
- */
+// Resume a specific session
 program
   .command('resume <session-id>')
   .alias('r')
@@ -551,190 +127,27 @@ program
   .option('--reference', 'Use file reference instead of inline context (for very large sessions)')
   .option('--no-tui', 'Disable interactive prompts')
   .action(async (sessionId, options) => {
-    try {
-      const spinner = isTTY && !options.noTui ? ora('Finding session...').start() : null;
-      const session = await findSession(sessionId);
-      if (spinner) spinner.stop();
-
-      if (!session) {
-        // Try to find similar sessions
-        const allSessions = await getAllSessions();
-        const similar = allSessions.filter(s => 
-          s.id.toLowerCase().includes(sessionId.toLowerCase()) ||
-          s.summary?.toLowerCase().includes(sessionId.toLowerCase())
-        ).slice(0, 3);
-
-        console.error(chalk.red(`Session not found: ${sessionId}`));
-        
-        if (similar.length > 0) {
-          console.log(chalk.yellow('\nDid you mean one of these?'));
-          for (const s of similar) {
-            console.log('  ' + formatSessionColored(s));
-          }
-        }
-        
-        process.exitCode = 1;
-        return;
-      }
-
-      const target = options.in as SessionSource | undefined;
-      const mode = options.reference ? 'reference' as const : 'inline' as const;
-
-      // In non-interactive mode, just resume directly
-      if (!isTTY || options.noTui) {
-        console.log(chalk.gray('Session: ') + formatSession(session));
-        console.log(chalk.gray('Command: ') + chalk.cyan(getResumeCommand(session, target)));
-        console.log();
-
-        if (session.cwd) process.chdir(session.cwd);
-        await resume(session, target, mode);
-        return;
-      }
-
-      // Interactive mode - show details and prompt for target if not specified
-      if (isTTY && !target) {
-        clack.intro(chalk.bold('Resume session'));
-        
-        console.log(formatSessionColored(session));
-        console.log();
-
-        const availableTools = await getAvailableTools();
-        
-        const targetOptions = availableTools
-          .filter(t => t !== session.source)
-          .map(t => ({
-            value: t,
-            label: `${sourceColors[t](t.charAt(0).toUpperCase() + t.slice(1))}`,
-          }));
-
-        if (targetOptions.length === 0) {
-          const missing = ALL_TOOLS.filter(t => !availableTools.includes(t)).map(t => t.charAt(0).toUpperCase() + t.slice(1));
-          clack.log.warn(`Only ${sourceColors[session.source](session.source)} is installed. Install at least one more (${missing.join(', ')}) to enable cross-tool handoff.`);
-          return;
-        }
-
-        const selectedTarget = await clack.select({
-          message: `Continue ${sourceColors[session.source](session.source)} session in:`,
-          options: targetOptions,
-        }) as SessionSource;
-
-        if (clack.isCancel(selectedTarget)) {
-          clack.cancel('Cancelled');
-          return;
-        }
-
-        clack.log.step(`Handing off to ${selectedTarget}...`);
-        clack.outro(`Launching ${selectedTarget}`);
-
-        if (session.cwd) process.chdir(session.cwd);
-        await resume(session, selectedTarget, mode);
-      } else {
-        // Target specified, just resume
-        console.log(chalk.gray('Session: ') + formatSession(session));
-        console.log(chalk.gray('Command: ') + chalk.cyan(getResumeCommand(session, target)));
-        console.log();
-
-        if (session.cwd) process.chdir(session.cwd);
-        await resume(session, target, mode);
-      }
-
-    } catch (error) {
-      if (clack.isCancel(error)) {
-        clack.cancel('Cancelled');
-        return;
-      }
-      console.error(chalk.red('Error:'), (error as Error).message);
-      process.exitCode = 1;
-    }
+    await resumeCommand(sessionId, options, cliContext);
   });
 
-/**
- * Scan command - show session discovery stats
- */
+// Scan command
 program
   .command('scan')
   .description('Show session discovery statistics')
   .option('--rebuild', 'Force rebuild session index')
   .action(async (options) => {
-    try {
-      const spinner = isTTY ? ora('Scanning session directories...').start() : null;
-      
-      const sessions = await getAllSessions(options.rebuild);
-      
-      if (spinner) spinner.stop();
-
-      if (isTTY) {
-        clack.intro(chalk.bold('Session Discovery Statistics'));
-      }
-
-      const bySource = sessions.reduce((acc, s) => {
-        acc[s.source] = (acc[s.source] || 0) + 1;
-        return acc;
-      }, {} as Record<string, number>);
-
-      console.log();
-      console.log(chalk.bold(`Total sessions: ${sessions.length}`));
-      console.log();
-
-      for (const [source, count] of Object.entries(bySource).sort((a, b) => b[1] - a[1])) {
-        const colorFn = sourceColors[source as SessionSource] || chalk.white;
-        const bar = '█'.repeat(Math.min(50, Math.floor(count / 10)));
-        console.log(`${colorFn(source.padEnd(8))}: ${count.toString().padStart(4)} ${chalk.gray(bar)}`);
-      }
-
-      if (isTTY) {
-        console.log();
-        clack.outro(chalk.gray('Run "continues" to pick a session'));
-      }
-    } catch (error) {
-      console.error(chalk.red('Error:'), (error as Error).message);
-      process.exitCode = 1;
-    }
+    await scanCommand(options, cliContext);
   });
 
-/**
- * Rebuild the session index
- */
+// Rebuild the session index
 program
   .command('rebuild')
   .description('Force rebuild the session index cache')
   .action(async () => {
-    const spinner = isTTY ? clack.spinner() : null;
-    
-    try {
-      if (spinner) {
-        spinner.start('Rebuilding session index...');
-      }
-      
-      const sessions = await buildIndex(true);
-      
-      if (spinner) {
-        spinner.stop(`Index rebuilt with ${sessions.length} sessions`);
-      } else {
-        console.log(`Index rebuilt with ${sessions.length} sessions`);
-      }
-
-      // Show summary by source
-      const bySource = sessions.reduce((acc, s) => {
-        acc[s.source] = (acc[s.source] || 0) + 1;
-        return acc;
-      }, {} as Record<string, number>);
-
-      for (const [source, count] of Object.entries(bySource)) {
-        console.log(chalk.gray(`  ${source}: ${count} sessions`));
-      }
-    } catch (error) {
-      if (spinner) {
-        spinner.stop('Failed to rebuild index');
-      }
-      console.error(chalk.red('Error:'), (error as Error).message);
-      process.exitCode = 1;
-    }
+    await rebuildCommand(cliContext);
   });
 
-/**
- * Quick resume commands for each tool — generated from the adapter registry
- */
+// Quick resume commands for each tool — generated from the adapter registry
 for (const tool of ALL_TOOLS) {
   const adapter = adapters[tool];
   program
@@ -743,33 +156,6 @@ for (const tool of ALL_TOOLS) {
     .action(async (n = '1') => {
       await resumeBySource(tool, parseInt(n, 10));
     });
-}
-
-/**
- * Helper to resume Nth session from a source
- */
-async function resumeBySource(source: SessionSource, n: number): Promise<void> {
-  try {
-    const sessions = await getSessionsBySource(source);
-    
-    if (sessions.length === 0) {
-      console.log(chalk.yellow(`No ${source} sessions found.`));
-      return;
-    }
-
-    const index = Math.max(0, Math.min(n - 1, sessions.length - 1));
-    const session = sessions[index];
-
-    console.log(chalk.gray(`Resuming ${source} session #${index + 1}:`));
-    console.log(formatSessionColored(session));
-    console.log();
-
-    if (session.cwd) process.chdir(session.cwd);
-    await nativeResume(session);
-  } catch (error) {
-    console.error(chalk.red('Error:'), (error as Error).message);
-    process.exitCode = 1;
-  }
 }
 
 // Parse and run

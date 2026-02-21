@@ -1,10 +1,11 @@
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import type { UnifiedSession, SessionSource, SessionContext } from '../types/index.js';
+import { logger } from '../logger.js';
+import { ALL_TOOLS, adapters } from '../parsers/registry.js';
+import type { SessionContext, SessionSource, UnifiedSession } from '../types/index.js';
 import { extractContext, saveContext } from './index.js';
-import { SOURCE_LABELS } from './markdown.js';
-import { adapters, ALL_TOOLS } from '../parsers/registry.js';
+import { getSourceLabels } from './markdown.js';
 
 /**
  * Resume a session using native CLI commands
@@ -29,15 +30,17 @@ export async function crossToolResume(
 
   // Always save handoff file to project directory (for sandboxed tools like Gemini)
   const localPath = path.join(cwd, '.continues-handoff.md');
-  try { fs.writeFileSync(localPath, context.markdown); } catch { /* non-critical */ }
+  try {
+    fs.writeFileSync(localPath, context.markdown);
+  } catch (err) {
+    logger.debug('resume: failed to write handoff file', localPath, err);
+  }
 
   // Also save to global directory as backup
   saveContext(context);
 
   // Build prompt based on mode
-  const prompt = mode === 'inline'
-    ? buildInlinePrompt(context, session)
-    : buildReferencePrompt(session, localPath);
+  const prompt = mode === 'inline' ? buildInlinePrompt(context, session) : buildReferencePrompt(session);
 
   const adapter = adapters[target];
   if (!adapter) throw new Error(`Unknown target: ${target}`);
@@ -49,7 +52,7 @@ export async function crossToolResume(
  * The LLM gets everything upfront — no file reading needed.
  */
 function buildInlinePrompt(context: SessionContext, session: UnifiedSession): string {
-  const sourceLabel = SOURCE_LABELS[session.source] || session.source;
+  const sourceLabel = getSourceLabels()[session.source] || session.source;
 
   // Simple intro — the handoff markdown already has the full table, conversation, and closing directive
   const intro = `I'm continuing a coding session from **${sourceLabel}**. Here's the full context:\n\n---\n\n`;
@@ -61,8 +64,8 @@ function buildInlinePrompt(context: SessionContext, session: UnifiedSession): st
  * Build a compact reference prompt that points to the handoff file.
  * Used when --reference flag is passed (for very large sessions).
  */
-function buildReferencePrompt(session: UnifiedSession, filePath: string): string {
-  const sourceLabel = SOURCE_LABELS[session.source] || session.source;
+function buildReferencePrompt(session: UnifiedSession): string {
+  const sourceLabel = getSourceLabels()[session.source] || session.source;
 
   return [
     `# 🔄 Session Handoff`,
@@ -77,13 +80,19 @@ function buildReferencePrompt(session: UnifiedSession, filePath: string): string
     session.summary ? `| Last task | ${session.summary.slice(0, 80)} |` : '',
     ``,
     `Read \`.continues-handoff.md\` first, then continue the work.`,
-  ].filter(Boolean).join('\n');
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 /**
  * Resume a session - automatically chooses native or cross-tool
  */
-export async function resume(session: UnifiedSession, target?: SessionSource, mode: 'inline' | 'reference' = 'inline'): Promise<void> {
+export async function resume(
+  session: UnifiedSession,
+  target?: SessionSource,
+  mode: 'inline' | 'reference' = 'inline',
+): Promise<void> {
   const actualTarget = target || session.source;
 
   if (actualTarget === session.source) {
@@ -141,17 +150,17 @@ async function isBinaryAvailable(binaryName: string): Promise<boolean> {
  */
 export async function getAvailableTools(): Promise<SessionSource[]> {
   const checks = await Promise.allSettled(
-    ALL_TOOLS.map(async name => ({
+    ALL_TOOLS.map(async (name) => ({
       name,
       ok: await isBinaryAvailable(adapters[name].binaryName),
-    }))
+    })),
   );
 
   return checks
-    .filter((r): r is PromiseFulfilledResult<{ name: SessionSource; ok: boolean }> =>
-      r.status === 'fulfilled' && r.value.ok
+    .filter(
+      (r): r is PromiseFulfilledResult<{ name: SessionSource; ok: boolean }> => r.status === 'fulfilled' && r.value.ok,
     )
-    .map(r => r.value.name);
+    .map((r) => r.value.name);
 }
 
 /**

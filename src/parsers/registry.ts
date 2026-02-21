@@ -1,12 +1,13 @@
 import chalk from 'chalk';
-import type { SessionSource, UnifiedSession, SessionContext } from '../types/index.js';
-import { parseClaudeSessions, extractClaudeContext } from './claude.js';
-import { parseCodexSessions, extractCodexContext } from './codex.js';
-import { parseCopilotSessions, extractCopilotContext } from './copilot.js';
-import { parseGeminiSessions, extractGeminiContext } from './gemini.js';
-import { parseOpenCodeSessions, extractOpenCodeContext } from './opencode.js';
-import { parseDroidSessions, extractDroidContext } from './droid.js';
-import { parseCursorSessions, extractCursorContext } from './cursor.js';
+import type { SessionContext, SessionSource, UnifiedSession } from '../types/index.js';
+import { TOOL_NAMES } from '../types/tool-names.js';
+import { extractClaudeContext, parseClaudeSessions } from './claude.js';
+import { extractCodexContext, parseCodexSessions } from './codex.js';
+import { extractCopilotContext, parseCopilotSessions } from './copilot.js';
+import { extractCursorContext, parseCursorSessions } from './cursor.js';
+import { extractDroidContext, parseDroidSessions } from './droid.js';
+import { extractGeminiContext, parseGeminiSessions } from './gemini.js';
+import { extractOpenCodeContext, parseOpenCodeSessions } from './opencode.js';
 
 /**
  * Adapter interface — single contract for all supported CLI tools.
@@ -39,7 +40,7 @@ export interface ToolAdapter {
  * Central registry — single source of truth for all supported tools.
  * Insertion order determines display order in the TUI.
  */
-const _adapters: Record<string, ToolAdapter> = {};
+const _adapters: Partial<Record<SessionSource, ToolAdapter>> = {};
 
 function register(adapter: ToolAdapter): void {
   _adapters[adapter.name] = adapter;
@@ -143,13 +144,21 @@ register({
   resumeCommandDisplay: (s) => `cursor ${s.cwd}`,
 });
 
+// ── Completeness assertion ──────────────────────────────────────────
+// Runs at module load — if a new tool is added to TOOL_NAMES but not
+// registered here, this throws immediately with a clear message.
+const missing = TOOL_NAMES.filter((name) => !(name in _adapters));
+if (missing.length > 0) {
+  throw new Error(`Registry incomplete: missing adapter(s) for ${missing.join(', ')}`);
+}
+
 // ── Exports ──────────────────────────────────────────────────────────
 
-/** Type-safe adapter lookup */
-export const adapters = _adapters as Record<SessionSource, ToolAdapter>;
+/** Type-safe adapter lookup — completeness proven by runtime assertion above */
+export const adapters: Readonly<Record<SessionSource, ToolAdapter>> = _adapters as Record<SessionSource, ToolAdapter>;
 
-/** Ordered list of all tool names */
-export const ALL_TOOLS: SessionSource[] = Object.keys(adapters) as SessionSource[];
+/** Ordered list of all tool names — derived from the canonical TOOL_NAMES array */
+export const ALL_TOOLS: readonly SessionSource[] = TOOL_NAMES;
 
 /** Formatted help string for --source options */
 export const SOURCE_HELP = `Filter by source (${ALL_TOOLS.join(', ')})`;
