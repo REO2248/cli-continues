@@ -7,6 +7,19 @@ import type {
   ToolUsageSummary,
   UnifiedSession,
 } from '../types/index.js';
+import {
+  SHELL_TOOLS,
+  READ_TOOLS,
+  WRITE_TOOLS,
+  EDIT_TOOLS,
+  GREP_TOOLS,
+  GLOB_TOOLS,
+  SEARCH_TOOLS,
+  FETCH_TOOLS,
+  TASK_TOOLS,
+  TASK_OUTPUT_TOOLS,
+  ASK_TOOLS,
+} from '../types/tool-names.js';
 
 /** Human-readable labels for each session source — derived lazily from the adapter registry */
 let _sourceLabels: Record<string, string> | null = null;
@@ -51,36 +64,29 @@ const REFERENCE_CAPS: DisplayCaps = {
 
 // ── Category Ordering ───────────────────────────────────────────────────────
 
-/** Fixed order: most action-relevant first */
-const CATEGORY_ORDER: Record<string, number> = {
-  Bash: 0,
-  shell: 0,
-  Write: 1,
-  WriteFile: 1,
-  write_file: 1,
-  Create: 1,
-  create_file: 1,
-  Edit: 2,
-  EditFile: 2,
-  edit_file: 2,
-  apply_diff: 2,
-  ApplyPatch: 2,
-  Read: 3,
-  ReadFile: 3,
-  read_file: 3,
-  Grep: 4,
-  grep: 4,
-  codebase_search: 4,
-  Glob: 5,
-  LS: 5,
-  WebSearch: 6,
-  web_search: 6,
-  WebFetch: 7,
-  web_fetch: 7,
-  Task: 8,
-  TaskOutput: 8,
-  AskUserQuestion: 9,
-};
+/** Build sort-order map from the canonical tool name sets — never goes stale */
+function buildCategoryOrder(): Record<string, number> {
+  const order: Record<string, number> = {};
+  const mapping: [ReadonlySet<string>, number][] = [
+    [SHELL_TOOLS, 0],
+    [WRITE_TOOLS, 1],
+    [EDIT_TOOLS, 2],
+    [READ_TOOLS, 3],
+    [GREP_TOOLS, 4],
+    [GLOB_TOOLS, 5],
+    [SEARCH_TOOLS, 6],
+    [FETCH_TOOLS, 7],
+    [TASK_TOOLS, 8],
+    [TASK_OUTPUT_TOOLS, 8],
+    [ASK_TOOLS, 9],
+  ];
+  for (const [set, priority] of mapping) {
+    for (const name of set) order[name] = priority;
+  }
+  return order;
+}
+
+const CATEGORY_ORDER: Record<string, number> = buildCategoryOrder();
 
 function getCategoryOrder(name: string): number {
   return CATEGORY_ORDER[name] ?? 10; // MCP/unknown go last
@@ -309,6 +315,13 @@ function renderShellSample(sample: ToolSample, maxStdoutLines: number): string[]
       lines.push(`> ${tl}`);
     }
     lines.push('> ```');
+  } else if (d.errored && d.errorMessage) {
+    const errLines = d.errorMessage.split('\n').slice(0, maxStdoutLines);
+    lines.push('> ```');
+    for (const el of errLines) {
+      lines.push(`> ${el}`);
+    }
+    lines.push('> ```');
   }
 
   lines.push('');
@@ -318,7 +331,8 @@ function renderShellSample(sample: ToolSample, maxStdoutLines: number): string[]
 // ── Write Renderer ──────────────────────────────────────────────────────────
 
 function renderWriteSection(tool: ToolUsageSummary, caps: DisplayCaps): string[] {
-  const lines: string[] = [`### Write (${tool.count} calls)`, ''];
+  const errorStr = tool.errorCount ? `, ${tool.errorCount} errors` : '';
+  const lines: string[] = [`### Write (${tool.count} calls${errorStr})`, ''];
 
   const detailed = tool.samples.slice(0, caps.writeEditDetailed);
   const overflow: string[] = [];
@@ -381,7 +395,8 @@ function renderWriteSample(sample: ToolSample, maxDiffLines: number): string[] {
 // ── Edit Renderer ───────────────────────────────────────────────────────────
 
 function renderEditSection(tool: ToolUsageSummary, caps: DisplayCaps): string[] {
-  const lines: string[] = [`### Edit (${tool.count} calls)`, ''];
+  const errorStr = tool.errorCount ? `, ${tool.errorCount} errors` : '';
+  const lines: string[] = [`### Edit (${tool.count} calls${errorStr})`, ''];
 
   const detailed = tool.samples.slice(0, caps.writeEditDetailed);
   const overflow: string[] = [];
@@ -441,7 +456,8 @@ function renderEditSample(sample: ToolSample, maxDiffLines: number): string[] {
 // ── Read Renderer ───────────────────────────────────────────────────────────
 
 function renderReadSection(tool: ToolUsageSummary, caps: DisplayCaps): string[] {
-  const lines: string[] = [`### Read (${tool.count} calls)`, ''];
+  const errorStr = tool.errorCount ? `, ${tool.errorCount} errors` : '';
+  const lines: string[] = [`### Read (${tool.count} calls${errorStr})`, ''];
 
   const shown = tool.samples.slice(0, caps.readEntries);
   for (const sample of shown) {
@@ -471,7 +487,8 @@ function renderReadSection(tool: ToolUsageSummary, caps: DisplayCaps): string[] 
 // ── Grep Renderer ───────────────────────────────────────────────────────────
 
 function renderGrepSection(tool: ToolUsageSummary, caps: DisplayCaps): string[] {
-  const lines: string[] = [`### Grep (${tool.count} calls)`, ''];
+  const errorStr = tool.errorCount ? `, ${tool.errorCount} errors` : '';
+  const lines: string[] = [`### Grep (${tool.count} calls${errorStr})`, ''];
 
   const shown = tool.samples.slice(0, caps.grepGlobSearchFetch);
   for (const sample of shown) {
@@ -494,7 +511,8 @@ function renderGrepSection(tool: ToolUsageSummary, caps: DisplayCaps): string[] 
 // ── Glob Renderer ───────────────────────────────────────────────────────────
 
 function renderGlobSection(tool: ToolUsageSummary, caps: DisplayCaps): string[] {
-  const lines: string[] = [`### Glob (${tool.count} calls)`, ''];
+  const errorStr = tool.errorCount ? `, ${tool.errorCount} errors` : '';
+  const lines: string[] = [`### Glob (${tool.count} calls${errorStr})`, ''];
 
   const shown = tool.samples.slice(0, caps.grepGlobSearchFetch);
   for (const sample of shown) {
@@ -521,7 +539,8 @@ function renderCompactSection(
   caps: DisplayCaps,
 ): string[] {
   const label = COMPACT_LABELS[category] || tool.name;
-  const lines: string[] = [`### ${label} (${tool.count} calls)`, ''];
+  const errorStr = tool.errorCount ? `, ${tool.errorCount} errors` : '';
+  const lines: string[] = [`### ${label} (${tool.count} calls${errorStr})`, ''];
   const cap = ['search', 'fetch'].includes(category) ? caps.grepGlobSearchFetch : caps.mcpTaskAsk;
 
   const shown = tool.samples.slice(0, cap);
@@ -548,8 +567,10 @@ function formatCompactSample(sample: ToolSample, category: string): string {
   if (!d) return `\`${sample.summary}\``;
 
   switch (d.category) {
-    case 'search':
-      return `"${d.query}"`;
+    case 'search': {
+      const countStr = d.resultCount !== undefined ? ` — ${d.resultCount} results` : '';
+      return `"${d.query}"${countStr}`;
+    }
     case 'fetch': {
       const preview = d.resultPreview ? ` — "${d.resultPreview}..."` : '';
       return `\`${d.url}\`${preview}`;

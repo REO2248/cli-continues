@@ -13,7 +13,7 @@ import { findFiles } from '../utils/fs-helpers.js';
 import { getFileStats, readJsonlFile, scanJsonlHead } from '../utils/jsonl.js';
 import { generateHandoffMarkdown } from '../utils/markdown.js';
 import { cleanSummary, extractRepo, homeDir } from '../utils/parser-helpers.js';
-import { extractStdoutTail } from '../utils/diff.js';
+import { countDiffStats, extractStdoutTail } from '../utils/diff.js';
 import {
   extractExitCode,
   mcpSummary,
@@ -296,11 +296,13 @@ function extractToolData(messages: CodexMessage[]): { summaries: ToolUsageSummar
           const fileList = files.length > 0 ? files.slice(0, 3).join(', ') : '(patch)';
           // Capture the patch content as diff (Codex patches are in unified diff-like format)
           const diff = input.length > 0 ? input : undefined;
+          const diffStats = diff ? countDiffStats(diff) : undefined;
           collector.add('apply_patch', `patch: ${truncate(fileList, 70)}`, {
             data: {
               category: 'edit',
               filePath: files[0] || '(multiple)',
               ...(diff ? { diff } : {}),
+              ...(diffStats ? { diffStats } : {}),
             },
             filePath: files[0],
             isWrite: true,

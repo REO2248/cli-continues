@@ -819,6 +819,45 @@ describe('Shared generateHandoffMarkdown', () => {
     expect(md).toContain('`"TODO"`');
     expect(md).toContain('5 matches');
   });
+
+  it('shows error count in non-shell section headers', () => {
+    const session: UnifiedSession = {
+      id: 'test',
+      source: 'claude',
+      cwd: '/tmp',
+      lines: 1,
+      bytes: 100,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      originalPath: '/tmp',
+    };
+
+    const toolSummaries: import('../types/index.js').ToolUsageSummary[] = [
+      {
+        name: 'Write',
+        count: 3,
+        errorCount: 2,
+        samples: [{ summary: 'write a.ts', data: { category: 'write', filePath: 'a.ts' } }],
+      },
+      {
+        name: 'Edit',
+        count: 1,
+        errorCount: 1,
+        samples: [{ summary: 'edit b.ts', data: { category: 'edit', filePath: 'b.ts' } }],
+      },
+      {
+        name: 'Grep',
+        count: 2,
+        errorCount: 1,
+        samples: [{ summary: 'grep "foo"', data: { category: 'grep', pattern: 'foo' } }],
+      },
+    ];
+
+    const md = generateHandoffMarkdown(session, [], [], [], toolSummaries);
+    expect(md).toContain('### Write (3 calls, 2 errors)');
+    expect(md).toContain('### Edit (1 calls, 1 errors)');
+    expect(md).toContain('### Grep (2 calls, 1 errors)');
+  });
 });
 
 // ─── All 20 Conversion Path Tests ──────────────────────────────────────────

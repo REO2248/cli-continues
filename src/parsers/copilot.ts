@@ -195,10 +195,12 @@ function extractCopilotToolSummaries(events: CopilotEvent[]): ToolUsageSummary[]
       entry.count++;
 
       if (entry.samples.length < 5) {
-        const argsStr = tr.arguments ? JSON.stringify(tr.arguments).slice(0, 100) : '';
+        const args = tr.arguments || {};
+        const data = buildCopilotSampleData(category, name, args);
+        const argsStr = Object.keys(args).length > 0 ? JSON.stringify(args).slice(0, 100) : '';
         entry.samples.push({
           summary: argsStr ? `${name}(${argsStr})` : name,
-          data: { category: 'mcp', toolName: name, ...(argsStr ? { params: argsStr } : {}) },
+          data,
         });
       }
     }
@@ -209,4 +211,45 @@ function extractCopilotToolSummaries(events: CopilotEvent[]): ToolUsageSummary[]
     count,
     samples,
   }));
+}
+
+/** Build the correct StructuredToolSample for a Copilot tool request based on its classified category */
+function buildCopilotSampleData(
+  category: import('../types/tool-names.js').ToolSampleCategory,
+  name: string,
+  args: Record<string, unknown>,
+): import('../types/index.js').StructuredToolSample {
+  const fp = (args.path as string) || (args.file_path as string) || '';
+  switch (category) {
+    case 'shell':
+      return { category: 'shell', command: (args.command as string) || (args.cmd as string) || '' };
+    case 'read':
+      return { category: 'read', filePath: fp };
+    case 'write':
+      return { category: 'write', filePath: fp };
+    case 'edit':
+      return { category: 'edit', filePath: fp };
+    case 'grep':
+      return {
+        category: 'grep',
+        pattern: (args.pattern as string) || (args.query as string) || '',
+        ...(fp ? { targetPath: fp } : {}),
+      };
+    case 'glob':
+      return { category: 'glob', pattern: (args.pattern as string) || fp };
+    case 'search':
+      return { category: 'search', query: (args.query as string) || '' };
+    case 'fetch':
+      return { category: 'fetch', url: (args.url as string) || '' };
+    case 'task':
+      return { category: 'task', description: (args.description as string) || '' };
+    case 'ask':
+      return { category: 'ask', question: ((args.question as string) || '').slice(0, 80) };
+    default:
+      return {
+        category: 'mcp',
+        toolName: name,
+        ...(Object.keys(args).length > 0 ? { params: JSON.stringify(args).slice(0, 100) } : {}),
+      };
+  }
 }

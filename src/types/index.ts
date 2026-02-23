@@ -67,6 +67,8 @@ export interface ShellSampleData {
   stdoutTail?: string;
   /** True when command exited non-zero or tool reported an error. */
   errored?: boolean;
+  /** First 200 chars of error output when errored. */
+  errorMessage?: string;
 }
 
 export interface ReadSampleData {
@@ -83,6 +85,8 @@ export interface WriteSampleData {
   /** Unified diff capped at maxLines. If truncated, ends with "+N lines truncated". */
   diff?: string;
   diffStats?: { added: number; removed: number };
+  /** First 200 chars of error text when the write failed. */
+  errorMessage?: string;
 }
 
 export interface EditSampleData {
@@ -91,6 +95,8 @@ export interface EditSampleData {
   /** Unified diff capped at maxLines. If truncated, ends with "+N lines truncated". */
   diff?: string;
   diffStats?: { added: number; removed: number };
+  /** First 200 chars of error text when the edit failed. */
+  errorMessage?: string;
 }
 
 export interface GrepSampleData {
@@ -109,6 +115,10 @@ export interface GlobSampleData {
 export interface SearchSampleData {
   category: 'search';
   query: string;
+  /** Number of results returned, if parseable. */
+  resultCount?: number;
+  /** First 100 characters of the search result. */
+  resultPreview?: string;
 }
 
 export interface FetchSampleData {

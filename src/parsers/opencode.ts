@@ -3,7 +3,7 @@ import { createRequire } from 'module';
 import * as path from 'path';
 import { z } from 'zod';
 import { logger } from '../logger.js';
-import type { ConversationMessage, SessionContext, UnifiedSession } from '../types/index.js';
+import type { ConversationMessage, SessionContext, ToolUsageSummary, UnifiedSession } from '../types/index.js';
 import type {
   OpenCodeProject,
   OpenCodeSession,
@@ -446,23 +446,68 @@ function readMessagesFromJson(sessionId: string): ConversationMessage[] {
 }
 
 /**
+ * Extract tool-level summary from OpenCode session metadata.
+ * OpenCode stores additions/deletions/files at the session level (not per-tool),
+ * so we produce a single high-level "Edit" summary when data is available.
+ */
+function extractOpenCodeToolSummaries(sessionId: string): ToolUsageSummary[] {
+  const summaries: ToolUsageSummary[] = [];
+
+  // Try to read the raw session file for summary.additions/deletions/files
+  const sessionDir = path.join(OPENCODE_STORAGE_DIR, 'session');
+  try {
+    for (const projectDir of listSubdirectories(sessionDir)) {
+      const sessionFile = path.join(projectDir, `${sessionId}.json`);
+      if (!fs.existsSync(sessionFile)) continue;
+      const content = fs.readFileSync(sessionFile, 'utf8');
+      const result = OpenCodeSessionSchema.safeParse(JSON.parse(content));
+      if (!result.success) break;
+      const raw = result.data;
+      if (raw.summary && (raw.summary.additions || raw.summary.deletions)) {
+        const added = raw.summary.additions || 0;
+        const removed = raw.summary.deletions || 0;
+        const files = raw.summary.files || 0;
+        summaries.push({
+          name: 'Edit',
+          count: files || 1,
+          samples: [
+            {
+              summary: `${files} file(s) changed (+${added} -${removed})`,
+              data: {
+                category: 'edit',
+                filePath: `(${files} files)`,
+                diffStats: { added, removed },
+              },
+            },
+          ],
+        });
+      }
+      break; // found the session file
+    }
+  } catch {
+    // Silently skip — tool summaries are optional
+  }
+
+  return summaries;
+}
+
+/**
  * Extract context from an OpenCode session for cross-tool continuation
  */
 export async function extractOpenCodeContext(session: UnifiedSession): Promise<SessionContext> {
   const recentMessages = readAllMessages(session.id);
   const filesModified: string[] = [];
   const pendingTasks: string[] = [];
+  const toolSummaries = extractOpenCodeToolSummaries(session.id);
 
-  const markdown = generateHandoffMarkdown(session, recentMessages.slice(-10), filesModified, pendingTasks, []);
+  const markdown = generateHandoffMarkdown(session, recentMessages.slice(-10), filesModified, pendingTasks, toolSummaries);
 
   return {
     session,
     recentMessages: recentMessages.slice(-10),
     filesModified,
     pendingTasks,
-    toolSummaries: [],
+    toolSummaries,
     markdown,
   };
 }
-
-// generateHandoffMarkdown is imported from ../utils/markdown.js

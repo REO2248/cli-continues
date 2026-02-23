@@ -14,7 +14,8 @@ import { extractTextFromBlocks } from '../utils/content.js';
 import { findFiles, listSubdirectories } from '../utils/fs-helpers.js';
 import { generateHandoffMarkdown } from '../utils/markdown.js';
 import { cleanSummary, homeDir } from '../utils/parser-helpers.js';
-import { fileSummary, mcpSummary, SummaryCollector, truncate } from '../utils/tool-summarizer.js';
+import { classifyToolName } from '../types/tool-names.js';
+import { fileSummary, mcpSummary, shellSummary, SummaryCollector, truncate } from '../utils/tool-summarizer.js';
 
 const GEMINI_BASE_DIR = path.join(homeDir(), '.gemini', 'tmp');
 
@@ -83,53 +84,103 @@ function extractToolData(sessionData: GeminiSession): { summaries: ToolUsageSumm
     if (msg.type !== 'gemini' || !msg.toolCalls) continue;
     for (const tc of msg.toolCalls) {
       const { name, args, result, resultDisplay } = tc;
+      const category = classifyToolName(name);
+      if (!category) continue; // skip internal tools
 
-      if (name === 'write_file') {
-        const fp = resultDisplay?.filePath || (args?.file_path as string) || '';
-        let diffStat: { added: number; removed: number } | undefined;
-        if (resultDisplay?.diffStat) {
-          diffStat = {
-            added: resultDisplay.diffStat.model_added_lines || 0,
-            removed: resultDisplay.diffStat.model_removed_lines || 0,
-          };
-        } else if (resultDisplay?.fileDiff) {
-          const lines = resultDisplay.fileDiff.split('\n');
-          diffStat = {
-            added: lines.filter((l: string) => l.startsWith('+')).length,
-            removed: lines.filter((l: string) => l.startsWith('-')).length,
-          };
-        }
-        const isNewFile = resultDisplay?.isNewFile ?? false;
-        // Capture the actual diff content from Gemini (it provides full diffs)
-        const diff = resultDisplay?.fileDiff || undefined;
-        collector.add('write_file', fileSummary('write', fp, diffStat, isNewFile), {
-          data: {
-            category: 'write',
+      const fp = resultDisplay?.filePath || (args?.file_path as string) || (args?.path as string) || '';
+      const resultStr = result?.[0]?.functionResponse?.response?.output;
+
+      switch (category) {
+        case 'write': {
+          let diffStat: { added: number; removed: number } | undefined;
+          if (resultDisplay?.diffStat) {
+            diffStat = {
+              added: resultDisplay.diffStat.model_added_lines || 0,
+              removed: resultDisplay.diffStat.model_removed_lines || 0,
+            };
+          } else if (resultDisplay?.fileDiff) {
+            const lines = resultDisplay.fileDiff.split('\n');
+            diffStat = {
+              added: lines.filter((l: string) => l.startsWith('+')).length,
+              removed: lines.filter((l: string) => l.startsWith('-')).length,
+            };
+          }
+          const isNewFile = resultDisplay?.isNewFile ?? false;
+          const diff = resultDisplay?.fileDiff || undefined;
+          collector.add(name, fileSummary('write', fp, diffStat, isNewFile), {
+            data: {
+              category: 'write',
+              filePath: fp,
+              isNewFile,
+              ...(diff ? { diff } : {}),
+              ...(diffStat ? { diffStats: diffStat } : {}),
+            },
             filePath: fp,
-            isNewFile,
-            ...(diff ? { diff } : {}),
-            ...(diffStat ? { diffStats: diffStat } : {}),
-          },
-          filePath: fp,
-          isWrite: true,
-        });
-      } else if (name === 'read_file') {
-        const fp = (args?.file_path as string) || '';
-        collector.add('read_file', fileSummary('read', fp), {
-          data: { category: 'read', filePath: fp },
-          filePath: fp,
-        });
-      } else {
-        const argsStr = args ? JSON.stringify(args).slice(0, 100) : '';
-        const resultStr = result?.[0]?.functionResponse?.response?.output;
-        collector.add(name, mcpSummary(name, argsStr, resultStr), {
-          data: {
-            category: 'mcp',
-            toolName: name,
-            ...(argsStr ? { params: argsStr } : {}),
-            ...(resultStr ? { result: String(resultStr).slice(0, 100) } : {}),
-          },
-        });
+            isWrite: true,
+          });
+          break;
+        }
+        case 'read':
+          collector.add(name, fileSummary('read', fp), {
+            data: { category: 'read', filePath: fp },
+            filePath: fp,
+          });
+          break;
+        case 'shell': {
+          const cmd = (args?.command as string) || (args?.cmd as string) || '';
+          const output = resultStr ? String(resultStr) : '';
+          collector.add(name, shellSummary(cmd, output || undefined), {
+            data: { category: 'shell', command: cmd, ...(output ? { stdoutTail: output.slice(-500) } : {}) },
+          });
+          break;
+        }
+        case 'edit':
+          collector.add(name, fileSummary('edit', fp), {
+            data: { category: 'edit', filePath: fp },
+            filePath: fp,
+            isWrite: true,
+          });
+          break;
+        case 'grep': {
+          const pattern = (args?.pattern as string) || (args?.query as string) || '';
+          collector.add(name, `grep "${truncate(pattern, 40)}"`, {
+            data: { category: 'grep', pattern, ...(fp ? { targetPath: fp } : {}) },
+          });
+          break;
+        }
+        case 'glob': {
+          const pattern = (args?.pattern as string) || fp;
+          collector.add(name, `glob ${truncate(pattern, 50)}`, {
+            data: { category: 'glob', pattern },
+          });
+          break;
+        }
+        case 'search':
+          collector.add(name, `search "${truncate((args?.query as string) || '', 50)}"`, {
+            data: { category: 'search', query: (args?.query as string) || '' },
+          });
+          break;
+        case 'fetch':
+          collector.add(name, `fetch ${truncate((args?.url as string) || '', 60)}`, {
+            data: {
+              category: 'fetch',
+              url: (args?.url as string) || '',
+              ...(resultStr ? { resultPreview: String(resultStr).slice(0, 100) } : {}),
+            },
+          });
+          break;
+        default: {
+          // task, ask, mcp — fallback to compact format
+          const argsStr = args ? JSON.stringify(args).slice(0, 100) : '';
+          collector.add(name, mcpSummary(name, argsStr, resultStr), {
+            data: {
+              category: 'mcp',
+              toolName: name,
+              ...(argsStr ? { params: argsStr } : {}),
+              ...(resultStr ? { result: String(resultStr).slice(0, 100) } : {}),
+            },
+          });
+        }
       }
     }
   }

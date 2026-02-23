@@ -139,12 +139,14 @@ export function extractAnthropicToolData(messages: AnthropicMessage[]): {
         const errored = isError || (exitCode !== undefined && exitCode !== 0);
         const stdoutTail = result ? extractStdoutTail(result, 5) : undefined;
 
+        const errorMessage = errored && result ? result.slice(0, 200) : undefined;
         const data: ShellSampleData = {
           category: 'shell',
           command: cmd,
           ...(exitCode !== undefined ? { exitCode } : {}),
           ...(stdoutTail ? { stdoutTail } : {}),
           ...(errored ? { errored } : {}),
+          ...(errorMessage ? { errorMessage } : {}),
         };
         collector.add('Bash', shellSummary(cmd, result), { data, isError: errored });
       } else if (READ_TOOLS.has(name)) {
@@ -167,7 +169,12 @@ export function extractAnthropicToolData(messages: AnthropicMessage[]): {
         const content = (input.content as string) || '';
         let diff: string | undefined;
         let diffStats: { added: number; removed: number } | undefined;
-        const isNewFile = true; // Write tool calls typically create new files
+        // Derive isNewFile from context: tool name hints, result text, or leave undefined
+        const isNewFile = ['Create', 'create_file'].includes(name)
+          ? true
+          : result && /\b(created|new file|overwr)/i.test(result)
+            ? /\b(created|new file)\b/i.test(result)
+            : undefined;
 
         if (content) {
           const diffResult = formatNewFileDiff(content, fp, 200);
@@ -175,14 +182,16 @@ export function extractAnthropicToolData(messages: AnthropicMessage[]): {
           diffStats = countDiffStats(diff);
         }
 
+        const writeErrorMsg = isError && result ? result.slice(0, 200) : undefined;
         const data: WriteSampleData = {
           category: 'write',
           filePath: fp,
-          isNewFile,
+          ...(isNewFile !== undefined ? { isNewFile } : {}),
           ...(diff ? { diff } : {}),
           ...(diffStats ? { diffStats } : {}),
+          ...(writeErrorMsg ? { errorMessage: writeErrorMsg } : {}),
         };
-        collector.add(name, withResult(fileSummary('write', fp, diffStats, isNewFile), result?.slice(0, 80)), {
+        collector.add(name, withResult(fileSummary('write', fp, diffStats, isNewFile ?? false), result?.slice(0, 80)), {
           data,
           filePath: fp,
           isWrite: true,
@@ -200,11 +209,13 @@ export function extractAnthropicToolData(messages: AnthropicMessage[]): {
           diffStats = countDiffStats(diff);
         }
 
+        const editErrorMsg = isError && result ? result.slice(0, 200) : undefined;
         const data: EditSampleData = {
           category: 'edit',
           filePath: fp,
           ...(diff ? { diff } : {}),
           ...(diffStats ? { diffStats } : {}),
+          ...(editErrorMsg ? { errorMessage: editErrorMsg } : {}),
         };
         collector.add(name, withResult(fileSummary('edit', fp, diffStats), result?.slice(0, 80)), {
           data,
@@ -245,7 +256,14 @@ export function extractAnthropicToolData(messages: AnthropicMessage[]): {
         collector.add('WebFetch', fetchSummary(url), { data });
       } else if (SEARCH_TOOLS.has(name)) {
         const query = (input.query as string) || '';
-        const data: SearchSampleData = { category: 'search', query };
+        const resultCount = result ? parseMatchCount(result) : undefined;
+        const resultPreview = result ? result.slice(0, 100) : undefined;
+        const data: SearchSampleData = {
+          category: 'search',
+          query,
+          ...(resultCount !== undefined ? { resultCount } : {}),
+          ...(resultPreview ? { resultPreview } : {}),
+        };
         collector.add('WebSearch', searchSummary(query), { data });
       } else if (TASK_TOOLS.has(name)) {
         const description = (input.description as string) || '';
@@ -310,22 +328,22 @@ function truncateParams(input: Record<string, unknown>): string {
   return parts.join(', ');
 }
 
-/** Parse match/file count from grep result text */
+/** Parse match count from grep result text — returns undefined if ambiguous */
 function parseMatchCount(result: string): number | undefined {
-  // "Found N files" or "N matches" patterns
-  const m = result.match(/(?:found|Found)\s+(\d+)/i) || result.match(/(\d+)\s+match/i);
+  const m =
+    result.match(/(?:found|matched)\s+(\d+)/i) ||
+    result.match(/(\d+)\s+(?:match|result|hit)/i);
   if (m) return parseInt(m[1]);
-  // Count newlines as a rough proxy for match count
-  const lines = result.split('\n').filter((l) => l.trim()).length;
-  return lines > 0 ? lines : undefined;
+  return undefined;
 }
 
-/** Parse file count from glob result text */
+/** Parse file count from glob result text — returns undefined if ambiguous */
 function parseFileCount(result: string): number | undefined {
-  const m = result.match(/(?:found|Found)\s+(\d+)/i) || result.match(/(\d+)\s+files?/i);
+  const m =
+    result.match(/(?:found|returned)\s+(\d+)/i) ||
+    result.match(/(\d+)\s+(?:file|match|result|entr)/i);
   if (m) return parseInt(m[1]);
-  const lines = result.split('\n').filter((l) => l.trim()).length;
-  return lines > 0 ? lines : undefined;
+  return undefined;
 }
 
 /**

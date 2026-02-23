@@ -608,7 +608,7 @@ describe('extractAnthropicToolData structured data', () => {
           {
             type: 'tool_use',
             id: 'tu1',
-            name: 'Write',
+            name: 'create_file',
             input: { file_path: '/src/new.ts', content: 'export const foo = 1;\nexport const bar = 2;' },
           },
         ],
@@ -616,7 +616,7 @@ describe('extractAnthropicToolData structured data', () => {
     ];
 
     const { summaries } = extractAnthropicToolData(messages);
-    const write = summaries.find((s) => s.name === 'Write');
+    const write = summaries.find((s) => s.name === 'create_file');
     expect(write).toBeDefined();
     const sample = write!.samples[0];
     expect(sample.data).toBeDefined();
@@ -721,5 +721,86 @@ describe('extractAnthropicToolData structured data', () => {
       expect(mcp!.samples[0].data!.params).toContain('repo=');
       expect(mcp!.samples[0].data!.result).toBeDefined();
     }
+  });
+
+  it('captures errorMessage for failed shell commands', () => {
+    const messages: AnthropicMessage[] = [
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'rm -rf /nope' } }],
+      },
+      {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'tu1', content: 'Permission denied\nexit code 1', is_error: true }],
+      },
+    ];
+    const { summaries } = extractAnthropicToolData(messages);
+    const shell = summaries.find((s) => s.name === 'Bash');
+    expect(shell).toBeDefined();
+    if (shell!.samples[0].data!.category === 'shell') {
+      expect(shell!.samples[0].data!.errored).toBe(true);
+      expect(shell!.samples[0].data!.errorMessage).toContain('Permission denied');
+    }
+  });
+
+  it('derives isNewFile=true for Create tool, undefined for Write tool', () => {
+    const messages: AnthropicMessage[] = [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'tu1', name: 'Create', input: { file_path: '/a.ts', content: 'x' } },
+          { type: 'tool_use', id: 'tu2', name: 'Write', input: { file_path: '/b.ts', content: 'y' } },
+        ],
+      },
+    ];
+    const { summaries } = extractAnthropicToolData(messages);
+    const create = summaries.find((s) => s.name === 'Create');
+    const write = summaries.find((s) => s.name === 'Write');
+    expect(create).toBeDefined();
+    expect(write).toBeDefined();
+    if (create!.samples[0].data!.category === 'write') {
+      expect(create!.samples[0].data!.isNewFile).toBe(true);
+    }
+    if (write!.samples[0].data!.category === 'write') {
+      expect(write!.samples[0].data!.isNewFile).toBeUndefined();
+    }
+  });
+
+  it('captures SearchSampleData with result preview', () => {
+    const messages: AnthropicMessage[] = [
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'tu1', name: 'WebSearch', input: { query: 'vitest mocking' } }],
+      },
+      {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'tu1', content: 'Found 5 results\n1. vitest docs...' }],
+      },
+    ];
+    const { summaries } = extractAnthropicToolData(messages);
+    const search = summaries.find((s) => s.name === 'WebSearch');
+    expect(search).toBeDefined();
+    if (search!.samples[0].data!.category === 'search') {
+      expect(search!.samples[0].data!.query).toBe('vitest mocking');
+      expect(search!.samples[0].data!.resultPreview).toContain('Found 5 results');
+      expect(search!.samples[0].data!.resultCount).toBe(5);
+    }
+  });
+});
+
+// ── Tool name classification v2 (new aliases) ──────────────────────────────
+
+describe('classifyToolName v2 aliases', () => {
+  it('classifies apply_patch as edit', () => {
+    expect(classifyToolName('apply_patch')).toBe('edit');
+  });
+
+  it('classifies web_search_call as search', () => {
+    expect(classifyToolName('web_search_call')).toBe('search');
+  });
+
+  it('skips update_plan and view_image', () => {
+    expect(classifyToolName('update_plan')).toBeUndefined();
+    expect(classifyToolName('view_image')).toBeUndefined();
   });
 });
