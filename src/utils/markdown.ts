@@ -19,6 +19,7 @@ import {
   TASK_TOOLS,
   TASK_OUTPUT_TOOLS,
   ASK_TOOLS,
+  classifyToolName,
 } from '../types/tool-names.js';
 
 /** Human-readable labels for each session source — derived lazily from the adapter registry */
@@ -136,6 +137,18 @@ export function generateHandoffMarkdown(
       `| **Tokens Used** | ${sessionNotes.tokenUsage.input.toLocaleString()} in / ${sessionNotes.tokenUsage.output.toLocaleString()} out |`,
     );
   }
+  if (sessionNotes?.cacheTokens) {
+    lines.push(
+      `| **Cache Tokens** | ${sessionNotes.cacheTokens.read.toLocaleString()} read / ${sessionNotes.cacheTokens.creation.toLocaleString()} created |`,
+    );
+  }
+  if (sessionNotes?.thinkingTokens) {
+    lines.push(`| **Thinking Tokens** | ${sessionNotes.thinkingTokens.toLocaleString()} |`);
+  }
+  if (sessionNotes?.activeTimeMs) {
+    const mins = Math.round(sessionNotes.activeTimeMs / 60000);
+    lines.push(`| **Active Time** | ${mins} min |`);
+  }
   lines.push(`| **Files Modified** | ${filesModified.length} |`);
   lines.push(`| **Messages** | ${messages.length} |`);
   lines.push('');
@@ -145,6 +158,14 @@ export function generateHandoffMarkdown(
     lines.push('## Summary');
     lines.push('');
     lines.push(`> ${session.summary}`);
+    lines.push('');
+    lines.push('');
+  }
+
+  if (sessionNotes?.compactSummary) {
+    lines.push('## Session Context (Compacted)');
+    lines.push('');
+    lines.push(`> ${sessionNotes.compactSummary}`);
     lines.push('');
     lines.push('');
   }
@@ -212,10 +233,67 @@ export function generateHandoffMarkdown(
   return lines.join('\n');
 }
 
+// ── MCP Namespace Grouping ───────────────────────────────────────────────────
+
+/** Max samples to keep per grouped MCP namespace */
+const MCP_GROUP_SAMPLE_CAP = 5;
+
+/**
+ * Group MCP tools sharing a `mcp__<namespace>__*` prefix into a single
+ * synthetic ToolUsageSummary. Non-namespaced tools pass through unchanged.
+ */
+function groupMcpByNamespace(summaries: ToolUsageSummary[]): ToolUsageSummary[] {
+  const result: ToolUsageSummary[] = [];
+  const nsGroups = new Map<string, ToolUsageSummary[]>();
+
+  for (const tool of summaries) {
+    const category = detectCategory(tool);
+    if (category !== 'mcp' || !tool.name.startsWith('mcp__')) {
+      result.push(tool);
+      continue;
+    }
+    // Extract namespace: mcp__github__list_issues → github
+    const parts = tool.name.split('__');
+    if (parts.length < 3) {
+      result.push(tool);
+      continue;
+    }
+    const ns = parts[1];
+    if (!nsGroups.has(ns)) nsGroups.set(ns, []);
+    nsGroups.get(ns)!.push(tool);
+  }
+
+  // Merge groups with 2+ tools; leave singletons ungrouped
+  for (const [ns, tools] of nsGroups) {
+    if (tools.length === 1) {
+      result.push(tools[0]);
+      continue;
+    }
+    const totalCount = tools.reduce((s, t) => s + t.count, 0);
+    const totalErrors = tools.reduce((s, t) => s + (t.errorCount || 0), 0);
+    const mergedSamples: ToolSample[] = [];
+    for (const t of tools) {
+      for (const s of t.samples) {
+        if (mergedSamples.length < MCP_GROUP_SAMPLE_CAP) mergedSamples.push(s);
+      }
+    }
+    result.push({
+      name: `MCP: ${ns}`,
+      count: totalCount,
+      ...(totalErrors > 0 ? { errorCount: totalErrors } : {}),
+      samples: mergedSamples,
+    });
+  }
+
+  return result;
+}
+
 // ── Category-Aware Rendering ────────────────────────────────────────────────
 
 function renderToolActivity(toolSummaries: ToolUsageSummary[], caps: DisplayCaps): string[] {
-  const sorted = [...toolSummaries].sort((a, b) => getCategoryOrder(a.name) - getCategoryOrder(b.name));
+  // Group MCP tools by namespace (e.g. mcp__github__* → "MCP: github")
+  const grouped = groupMcpByNamespace(toolSummaries);
+  const sorted = [...grouped].sort((a, b) => getCategoryOrder(a.name) - getCategoryOrder(b.name));
   const lines: string[] = [];
 
   for (const tool of sorted) {
@@ -259,19 +337,8 @@ function renderToolActivity(toolSummaries: ToolUsageSummary[], caps: DisplayCaps
 function detectCategory(tool: ToolUsageSummary): string {
   const firstData = tool.samples[0]?.data;
   if (firstData) return firstData.category;
-  // Fallback: guess from tool name
-  const name = tool.name;
-  if (['Bash', 'shell'].includes(name) || name.includes('terminal') || name.includes('exec')) return 'shell';
-  if (['Write', 'WriteFile', 'write_file', 'Create', 'create_file'].includes(name)) return 'write';
-  if (['Edit', 'EditFile', 'edit_file', 'apply_diff', 'ApplyPatch'].includes(name)) return 'edit';
-  if (['Read', 'ReadFile', 'read_file'].includes(name)) return 'read';
-  if (['Grep', 'grep', 'codebase_search'].includes(name)) return 'grep';
-  if (['Glob', 'glob', 'list_directory', 'file_search', 'LS'].includes(name)) return 'glob';
-  if (['WebSearch', 'web_search'].includes(name)) return 'search';
-  if (['WebFetch', 'web_fetch'].includes(name)) return 'fetch';
-  if (['Task', 'TaskOutput'].includes(name)) return 'task';
-  if (['AskUserQuestion', 'request_user_input'].includes(name)) return 'ask';
-  return 'mcp';
+  // Fallback: use canonical classifier from tool-names.ts (never goes stale)
+  return classifyToolName(tool.name) || 'mcp';
 }
 
 // ── Shell Renderer ──────────────────────────────────────────────────────────

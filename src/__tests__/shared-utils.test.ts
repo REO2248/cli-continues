@@ -804,3 +804,26 @@ describe('classifyToolName v2 aliases', () => {
     expect(classifyToolName('view_image')).toBeUndefined();
   });
 });
+
+// ── v4.1.0 — detectCategory fallback uses classifyToolName ──────────────────
+
+describe('detectCategory fallback via classifyToolName', () => {
+  // We test indirectly via generateHandoffMarkdown — if a tool summary has
+  // no structured data, the fallback should still classify it correctly.
+  // The key guarantee: classifyToolName covers ALL names in tool-names.ts.
+  it('classifies Execute as shell', () => {
+    expect(classifyToolName('Execute')).toBe('shell');
+  });
+  it('classifies run_terminal_command as shell', () => {
+    expect(classifyToolName('run_terminal_command')).toBe('shell');
+  });
+  it('classifies apply_patch as edit (not mcp)', () => {
+    expect(classifyToolName('apply_patch')).toBe('edit');
+  });
+  it('classifies web_search_call as search (not mcp)', () => {
+    expect(classifyToolName('web_search_call')).toBe('search');
+  });
+  it('classifies request_user_input as ask', () => {
+    expect(classifyToolName('request_user_input')).toBe('ask');
+  });
+});

@@ -104,7 +104,6 @@ export async function extractCopilotContext(session: UnifiedSession): Promise<Se
   const events = await readJsonlFile<CopilotEvent>(eventsPath);
 
   const recentMessages: ConversationMessage[] = [];
-  const filesModified: string[] = [];
   const pendingTasks: string[] = [];
 
   // Process events to extract conversation
@@ -157,8 +156,8 @@ export async function extractCopilotContext(session: UnifiedSession): Promise<Se
     });
   }
 
-  // Extract tool summaries from toolRequests across all events
-  const toolSummaries = extractCopilotToolSummaries(events);
+  // Extract tool summaries and file modifications from toolRequests across all events
+  const { summaries: toolSummaries, filesModified } = extractCopilotToolSummaries(events);
 
   // Generate markdown for injection
   const markdown = generateHandoffMarkdown(session, recentMessages.slice(-10), filesModified, pendingTasks, toolSummaries);
@@ -177,8 +176,9 @@ export async function extractCopilotContext(session: UnifiedSession): Promise<Se
  * Extract tool usage summaries from Copilot events' toolRequests arrays.
  * Copilot doesn't provide tool results, so we capture names and arguments only.
  */
-function extractCopilotToolSummaries(events: CopilotEvent[]): ToolUsageSummary[] {
+function extractCopilotToolSummaries(events: CopilotEvent[]): { summaries: ToolUsageSummary[]; filesModified: string[] } {
   const toolCounts = new Map<string, { count: number; samples: Array<{ summary: string; data?: import('../types/index.js').StructuredToolSample }> }>();
+  const files = new Set<string>();
 
   for (const event of events) {
     if (event.type !== 'assistant.message') continue;
@@ -194,8 +194,15 @@ function extractCopilotToolSummaries(events: CopilotEvent[]): ToolUsageSummary[]
       const entry = toolCounts.get(name)!;
       entry.count++;
 
+      const args = tr.arguments || {};
+      const fp = (args.path as string) || (args.file_path as string) || '';
+
+      // Track files from write/edit tool requests
+      if ((category === 'write' || category === 'edit') && fp) {
+        files.add(fp);
+      }
+
       if (entry.samples.length < 5) {
-        const args = tr.arguments || {};
         const data = buildCopilotSampleData(category, name, args);
         const argsStr = Object.keys(args).length > 0 ? JSON.stringify(args).slice(0, 100) : '';
         entry.samples.push({
@@ -206,11 +213,13 @@ function extractCopilotToolSummaries(events: CopilotEvent[]): ToolUsageSummary[]
     }
   }
 
-  return Array.from(toolCounts.entries()).map(([name, { count, samples }]) => ({
+  const summaries = Array.from(toolCounts.entries()).map(([name, { count, samples }]) => ({
     name,
     count,
     samples,
   }));
+
+  return { summaries, filesModified: Array.from(files) };
 }
 
 /** Build the correct StructuredToolSample for a Copilot tool request based on its classified category */

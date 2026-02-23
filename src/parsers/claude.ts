@@ -128,13 +128,12 @@ function extractSessionNotes(messages: ClaudeMessage[]): SessionNotes {
   const reasoning = extractThinkingHighlights(anthropicMsgs);
   if (reasoning.length > 0) notes.reasoning = reasoning;
 
-  // Extract compact summary
+  // Extract compact summary — take the LAST one (most comprehensive in long sessions)
   for (const msg of messages) {
     if (msg.isCompactSummary && msg.message?.content) {
       const text = extractTextFromBlocks(msg.message.content);
       if (text) {
         notes.compactSummary = truncate(text, 500);
-        break;
       }
     }
   }

@@ -83,12 +83,13 @@ function extractToolData(sessionData: GeminiSession): { summaries: ToolUsageSumm
   for (const msg of sessionData.messages) {
     if (msg.type !== 'gemini' || !msg.toolCalls) continue;
     for (const tc of msg.toolCalls) {
-      const { name, args, result, resultDisplay } = tc;
+      const { name, args, result, resultDisplay, status } = tc;
       const category = classifyToolName(name);
       if (!category) continue; // skip internal tools
 
       const fp = resultDisplay?.filePath || (args?.file_path as string) || (args?.path as string) || '';
       const resultStr = result?.[0]?.functionResponse?.response?.output;
+      const isError = status ? !['ok', 'success', 'completed'].includes(status.toLowerCase()) : false;
 
       switch (category) {
         case 'write': {
@@ -117,6 +118,7 @@ function extractToolData(sessionData: GeminiSession): { summaries: ToolUsageSumm
             },
             filePath: fp,
             isWrite: true,
+            isError,
           });
           break;
         }
@@ -124,6 +126,7 @@ function extractToolData(sessionData: GeminiSession): { summaries: ToolUsageSumm
           collector.add(name, fileSummary('read', fp), {
             data: { category: 'read', filePath: fp },
             filePath: fp,
+            isError,
           });
           break;
         case 'shell': {
@@ -131,6 +134,7 @@ function extractToolData(sessionData: GeminiSession): { summaries: ToolUsageSumm
           const output = resultStr ? String(resultStr) : '';
           collector.add(name, shellSummary(cmd, output || undefined), {
             data: { category: 'shell', command: cmd, ...(output ? { stdoutTail: output.slice(-500) } : {}) },
+            isError,
           });
           break;
         }
@@ -139,12 +143,14 @@ function extractToolData(sessionData: GeminiSession): { summaries: ToolUsageSumm
             data: { category: 'edit', filePath: fp },
             filePath: fp,
             isWrite: true,
+            isError,
           });
           break;
         case 'grep': {
           const pattern = (args?.pattern as string) || (args?.query as string) || '';
           collector.add(name, `grep "${truncate(pattern, 40)}"`, {
             data: { category: 'grep', pattern, ...(fp ? { targetPath: fp } : {}) },
+            isError,
           });
           break;
         }
@@ -152,12 +158,14 @@ function extractToolData(sessionData: GeminiSession): { summaries: ToolUsageSumm
           const pattern = (args?.pattern as string) || fp;
           collector.add(name, `glob ${truncate(pattern, 50)}`, {
             data: { category: 'glob', pattern },
+            isError,
           });
           break;
         }
         case 'search':
           collector.add(name, `search "${truncate((args?.query as string) || '', 50)}"`, {
             data: { category: 'search', query: (args?.query as string) || '' },
+            isError,
           });
           break;
         case 'fetch':
@@ -167,6 +175,7 @@ function extractToolData(sessionData: GeminiSession): { summaries: ToolUsageSumm
               url: (args?.url as string) || '',
               ...(resultStr ? { resultPreview: String(resultStr).slice(0, 100) } : {}),
             },
+            isError,
           });
           break;
         default: {
@@ -179,6 +188,7 @@ function extractToolData(sessionData: GeminiSession): { summaries: ToolUsageSumm
               ...(argsStr ? { params: argsStr } : {}),
               ...(resultStr ? { result: String(resultStr).slice(0, 100) } : {}),
             },
+            isError,
           });
         }
       }
@@ -204,6 +214,15 @@ function extractSessionNotes(sessionData: GeminiSession): SessionNotes {
       if (!notes.tokenUsage) notes.tokenUsage = { input: 0, output: 0 };
       notes.tokenUsage.input += msg.tokens.input || 0;
       notes.tokenUsage.output += msg.tokens.output || 0;
+
+      // Accumulate cache and thinking tokens
+      if (msg.tokens.cached) {
+        if (!notes.cacheTokens) notes.cacheTokens = { creation: 0, read: 0 };
+        notes.cacheTokens.read += msg.tokens.cached;
+      }
+      if (msg.tokens.thoughts) {
+        notes.thinkingTokens = (notes.thinkingTokens || 0) + msg.tokens.thoughts;
+      }
     }
 
     if (msg.thoughts && reasoning.length < 5) {

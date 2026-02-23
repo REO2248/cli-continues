@@ -3,6 +3,7 @@ import * as path from 'path';
 import { logger } from '../logger.js';
 import type { ConversationMessage, SessionContext, SessionNotes, UnifiedSession } from '../types/index.js';
 import type {
+  DroidCompactionState,
   DroidEvent,
   DroidMessageEvent,
   DroidSessionStart,
@@ -21,6 +22,7 @@ import {
   extractAnthropicToolData,
   extractThinkingHighlights,
 } from '../utils/tool-extraction.js';
+import { truncate } from '../utils/tool-summarizer.js';
 
 const DROID_SESSIONS_DIR = path.join(homeDir(), '.factory', 'sessions');
 
@@ -167,6 +169,27 @@ function extractSessionNotes(events: DroidEvent[], settings: DroidSettings | nul
       input: settings.tokenUsage.inputTokens || 0,
       output: settings.tokenUsage.outputTokens || 0,
     };
+    const cacheCreation = settings.tokenUsage.cacheCreationTokens || 0;
+    const cacheRead = settings.tokenUsage.cacheReadTokens || 0;
+    if (cacheCreation || cacheRead) {
+      notes.cacheTokens = { creation: cacheCreation, read: cacheRead };
+    }
+    if (settings.tokenUsage.thinkingTokens) {
+      notes.thinkingTokens = settings.tokenUsage.thinkingTokens;
+    }
+  }
+  if (settings?.assistantActiveTimeMs) {
+    notes.activeTimeMs = settings.assistantActiveTimeMs;
+  }
+
+  // Extract compaction summary — take the LAST one (most comprehensive)
+  for (const event of events) {
+    if (event.type === 'compaction_state') {
+      const cs = event as DroidCompactionState;
+      if (cs.summaryText) {
+        notes.compactSummary = truncate(cs.summaryText, 500);
+      }
+    }
   }
 
   // Extract thinking highlights via shared utility

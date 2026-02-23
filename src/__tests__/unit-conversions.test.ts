@@ -953,3 +953,124 @@ describe('Cross-Source Uniqueness', () => {
     }
   });
 });
+
+// ─── v4.1.0 — Markdown Rendering Enhancements ──────────────────────────────
+
+describe('compactSummary rendering', () => {
+  const baseSession: UnifiedSession = {
+    id: 'test-compact',
+    source: 'claude',
+    cwd: '/tmp/test',
+    lines: 10,
+    bytes: 500,
+    createdAt: new Date('2025-01-01'),
+    updatedAt: new Date('2025-01-01'),
+    originalPath: '/tmp/test.jsonl',
+  };
+
+  it('renders compactSummary section when present', () => {
+    const md = generateHandoffMarkdown(baseSession, [], [], [], [], {
+      compactSummary: 'The user is building a CLI tool with 7 parsers.',
+    });
+    expect(md).toContain('## Session Context (Compacted)');
+    expect(md).toContain('The user is building a CLI tool with 7 parsers.');
+  });
+
+  it('omits compactSummary section when absent', () => {
+    const md = generateHandoffMarkdown(baseSession, [], [], [], [], {});
+    expect(md).not.toContain('## Session Context (Compacted)');
+  });
+});
+
+describe('cache/thinking token breakdown rendering', () => {
+  const baseSession: UnifiedSession = {
+    id: 'test-tokens',
+    source: 'droid',
+    cwd: '/tmp/test',
+    lines: 10,
+    bytes: 500,
+    createdAt: new Date('2025-01-01'),
+    updatedAt: new Date('2025-01-01'),
+    originalPath: '/tmp/test.jsonl',
+  };
+
+  it('renders cache token row when cacheTokens present', () => {
+    const md = generateHandoffMarkdown(baseSession, [], [], [], [], {
+      tokenUsage: { input: 1000, output: 500 },
+      cacheTokens: { creation: 200, read: 800 },
+    });
+    expect(md).toContain('**Cache Tokens**');
+    expect(md).toContain('800');
+    expect(md).toContain('200');
+  });
+
+  it('renders thinking token row when thinkingTokens present', () => {
+    const md = generateHandoffMarkdown(baseSession, [], [], [], [], {
+      thinkingTokens: 3500,
+    });
+    expect(md).toContain('**Thinking Tokens**');
+    expect(md).toContain('3,500');
+  });
+
+  it('renders active time row when activeTimeMs present', () => {
+    const md = generateHandoffMarkdown(baseSession, [], [], [], [], {
+      activeTimeMs: 180000,
+    });
+    expect(md).toContain('**Active Time**');
+    expect(md).toContain('3 min');
+  });
+
+  it('omits extended rows when fields absent', () => {
+    const md = generateHandoffMarkdown(baseSession, [], [], [], [], {});
+    expect(md).not.toContain('**Cache Tokens**');
+    expect(md).not.toContain('**Thinking Tokens**');
+    expect(md).not.toContain('**Active Time**');
+  });
+});
+
+describe('MCP namespace grouping', () => {
+  const baseSession: UnifiedSession = {
+    id: 'test-mcp-ns',
+    source: 'claude',
+    cwd: '/tmp/test',
+    lines: 10,
+    bytes: 500,
+    createdAt: new Date('2025-01-01'),
+    updatedAt: new Date('2025-01-01'),
+    originalPath: '/tmp/test.jsonl',
+  };
+
+  it('groups mcp__github__* tools under a single MCP: github header', () => {
+    const toolSummaries = [
+      {
+        name: 'mcp__github__list_issues',
+        count: 3,
+        samples: [{ summary: 'list_issues()', data: { category: 'mcp' as const, toolName: 'mcp__github__list_issues' } }],
+      },
+      {
+        name: 'mcp__github__create_pr',
+        count: 2,
+        samples: [{ summary: 'create_pr()', data: { category: 'mcp' as const, toolName: 'mcp__github__create_pr' } }],
+      },
+    ];
+    const md = generateHandoffMarkdown(baseSession, [], [], [], toolSummaries);
+    // Should have a single grouped section, not two separate ones
+    expect(md).toContain('### MCP (5 calls)');
+    // Should NOT have separate ### headers for each tool
+    expect(md).not.toContain('### mcp__github__list_issues');
+    expect(md).not.toContain('### mcp__github__create_pr');
+  });
+
+  it('leaves single-namespace MCP tools ungrouped', () => {
+    const toolSummaries = [
+      {
+        name: 'mcp__morph__edit_file',
+        count: 1,
+        samples: [{ summary: 'edit_file()', data: { category: 'mcp' as const, toolName: 'mcp__morph__edit_file' } }],
+      },
+    ];
+    const md = generateHandoffMarkdown(baseSession, [], [], [], toolSummaries);
+    // Single tool stays as-is
+    expect(md).toContain('mcp__morph__edit_file');
+  });
+});

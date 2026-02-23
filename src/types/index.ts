@@ -197,6 +197,12 @@ export interface SessionNotes {
   reasoning?: string[];
   /** Token usage statistics */
   tokenUsage?: { input: number; output: number };
+  /** Cache token breakdown (prompt caching) */
+  cacheTokens?: { creation: number; read: number };
+  /** Tokens spent on extended thinking / chain-of-thought */
+  thinkingTokens?: number;
+  /** Wall-clock time the AI assistant was actively working (ms) */
+  activeTimeMs?: number;
   /** Narrative summary from compact/compaction messages */
   compactSummary?: string;
 }
