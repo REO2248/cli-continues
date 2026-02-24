@@ -455,6 +455,14 @@ function renderWriteSample(sample: ToolSample, maxDiffLines: number): string[] {
     }
   }
 
+  if (d.errorMessage) {
+    const errLines = d.errorMessage.split('\n').slice(0, 3);
+    lines.push('> **Error:**');
+    lines.push('> ```');
+    for (const el of errLines) lines.push(`> ${el}`);
+    lines.push('> ```');
+  }
+
   lines.push('');
   return lines;
 }
@@ -514,6 +522,14 @@ function renderEditSample(sample: ToolSample, maxDiffLines: number): string[] {
     if (truncated > 0) {
       lines.push(`> *+${truncated} lines truncated*`);
     }
+  }
+
+  if (d.errorMessage) {
+    const errLines = d.errorMessage.split('\n').slice(0, 3);
+    lines.push('> **Error:**');
+    lines.push('> ```');
+    for (const el of errLines) lines.push(`> ${el}`);
+    lines.push('> ```');
   }
 
   lines.push('');
@@ -636,7 +652,8 @@ function formatCompactSample(sample: ToolSample, category: string): string {
   switch (d.category) {
     case 'search': {
       const countStr = d.resultCount !== undefined ? ` — ${d.resultCount} results` : '';
-      return `"${d.query}"${countStr}`;
+      const preview = d.resultPreview ? ` "${d.resultPreview.slice(0, 60)}..."` : '';
+      return `"${d.query}"${countStr}${preview}`;
     }
     case 'fetch': {
       const preview = d.resultPreview ? ` — "${d.resultPreview}..."` : '';
