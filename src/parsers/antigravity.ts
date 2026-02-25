@@ -13,7 +13,10 @@ import { cleanSummary, homeDir } from '../utils/parser-helpers.js';
 import type { VerbosityConfig } from '../config/index.js';
 import { getPreset } from '../config/index.js';
 
-const ANTIGRAVITY_BASE_DIR = path.join(homeDir(), '.gemini', 'antigravity', 'code_tracker');
+const ANTIGRAVITY_BASE_DIR = path.join(
+  process.env.GEMINI_CLI_HOME || homeDir(),
+  '.gemini', 'antigravity', 'code_tracker'
+);
 
 const SOURCE_NAME: SessionSource = 'antigravity';
 

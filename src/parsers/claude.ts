@@ -18,7 +18,9 @@ import { truncate } from '../utils/tool-summarizer.js';
 import type { VerbosityConfig } from '../config/index.js';
 import { getPreset } from '../config/index.js';
 
-const CLAUDE_PROJECTS_DIR = path.join(homeDir(), '.claude', 'projects');
+const CLAUDE_PROJECTS_DIR = process.env.CLAUDE_CONFIG_DIR
+  ? path.join(process.env.CLAUDE_CONFIG_DIR, 'projects')
+  : path.join(homeDir(), '.claude', 'projects');
 
 /**
  * Find all Claude session files recursively

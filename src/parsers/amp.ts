@@ -54,7 +54,9 @@ interface AmpThread {
   };
 }
 
-const AMP_BASE_DIR = path.join(homeDir(), '.local', 'share', 'amp', 'threads');
+const AMP_BASE_DIR = process.env.XDG_DATA_HOME
+  ? path.join(process.env.XDG_DATA_HOME, 'amp', 'threads')
+  : path.join(homeDir(), '.local', 'share', 'amp', 'threads');
 
 /**
  * Find all Amp thread JSON files

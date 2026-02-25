@@ -10,6 +10,7 @@ export function showNoSessionsHelp(): void {
   console.log();
   console.log(chalk.gray('Sessions are stored in:'));
   for (const a of Object.values(adapters)) {
-    console.log(chalk.gray(`  ${a.storagePath}`));
+    const envHint = a.envVar ? chalk.gray(` (override: $${a.envVar})`) : '';
+    console.log(chalk.gray(`  ${a.storagePath}`) + envHint);
   }
 }

@@ -39,6 +39,8 @@ export interface ToolAdapter {
   color: (s: string) => string;
   /** Storage directory path (for help text) */
   storagePath: string;
+  /** Environment variable that overrides the default storage path (if any) */
+  envVar?: string;
   /** CLI binary name for availability checks and spawning */
   binaryName: string;
   /** Discover and index all sessions */
@@ -387,6 +389,7 @@ register({
   label: 'Claude Code',
   color: chalk.blue,
   storagePath: '~/.claude/projects/',
+  envVar: 'CLAUDE_CONFIG_DIR',
   binaryName: 'claude',
   parseSessions: parseClaudeSessions,
   extractContext: extractClaudeContext,
@@ -402,6 +405,7 @@ register({
   label: 'Codex CLI',
   color: chalk.magenta,
   storagePath: '~/.codex/sessions/',
+  envVar: 'CODEX_HOME',
   binaryName: 'codex',
   parseSessions: parseCodexSessions,
   extractContext: extractCodexContext,
@@ -432,6 +436,7 @@ register({
   label: 'Gemini CLI',
   color: chalk.cyan,
   storagePath: '~/.gemini/tmp/*/chats/',
+  envVar: 'GEMINI_CLI_HOME',
   binaryName: 'gemini',
   parseSessions: parseGeminiSessions,
   extractContext: extractGeminiContext,
@@ -447,6 +452,7 @@ register({
   label: 'OpenCode',
   color: chalk.yellow,
   storagePath: '~/.local/share/opencode/storage/',
+  envVar: 'XDG_DATA_HOME',
   binaryName: 'opencode',
   parseSessions: parseOpenCodeSessions,
   extractContext: extractOpenCodeContext,
@@ -492,6 +498,7 @@ register({
   label: 'Amp CLI',
   color: chalk.hex('#FF6B35'),
   storagePath: '~/.local/share/amp/threads/',
+  envVar: 'XDG_DATA_HOME',
   binaryName: 'amp',
   parseSessions: parseAmpSessions,
   extractContext: extractAmpContext,
@@ -576,6 +583,7 @@ register({
   label: 'Antigravity',
   color: chalk.hex('#A8DADC'),
   storagePath: '~/.gemini/antigravity/code_tracker/',
+  envVar: 'GEMINI_CLI_HOME',
   binaryName: 'antigravity',
   parseSessions: parseAntigravitySessions,
   extractContext: extractAntigravityContext,

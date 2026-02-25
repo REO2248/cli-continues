@@ -19,8 +19,9 @@ import type { VerbosityConfig } from '../config/index.js';
 import { getPreset } from '../config/index.js';
 import { fileSummary, mcpSummary, shellSummary, SummaryCollector, truncate } from '../utils/tool-summarizer.js';
 
-const GEMINI_BASE_DIR = path.join(homeDir(), '.gemini', 'tmp');
-const GEMINI_LEGACY_DIR = path.join(homeDir(), '.gemini', 'sessions');
+const geminiHome = process.env.GEMINI_CLI_HOME || homeDir();
+const GEMINI_BASE_DIR = path.join(geminiHome, '.gemini', 'tmp');
+const GEMINI_LEGACY_DIR = path.join(geminiHome, '.gemini', 'sessions');
 
 /**
  * Find all Gemini session files (new and legacy storage formats)
