@@ -370,6 +370,11 @@ function extractSessionNotes(messages: CodexMessage[]): SessionNotes {
     // Token usage (take last value — cumulative)
     if (payload.type === 'token_count') {
       notes.tokenUsage = { input: payload.input_tokens || 0, output: payload.output_tokens || 0 };
+      // Codex may report reasoning tokens separately (OpenAI o-series models)
+      const reasoningTokens = (payload as Record<string, unknown>).reasoning_output_tokens;
+      if (typeof reasoningTokens === 'number' && reasoningTokens > 0) {
+        notes.thinkingTokens = reasoningTokens;
+      }
     }
   }
 

@@ -297,6 +297,33 @@ function extractSessionNotes(messages: ClaudeMessage[], config?: VerbosityConfig
     }
   }
 
+  // Aggregate token usage, cache tokens, and model from assistant messages
+  for (const msg of messages) {
+    if (msg.type !== 'assistant') continue;
+    const msgObj = msg.message as Record<string, unknown> | undefined;
+    if (!msgObj) continue;
+
+    // Fallback: message.model carries the full model identifier from the API response
+    if (msgObj.model && !notes.model) {
+      notes.model = msgObj.model as string;
+    }
+
+    const usage = msgObj.usage as Record<string, number> | undefined;
+    if (!usage) continue;
+
+    if (!notes.tokenUsage) notes.tokenUsage = { input: 0, output: 0 };
+    notes.tokenUsage.input += usage.input_tokens || 0;
+    notes.tokenUsage.output += usage.output_tokens || 0;
+
+    const cacheCreation = usage.cache_creation_input_tokens || 0;
+    const cacheRead = usage.cache_read_input_tokens || 0;
+    if (cacheCreation || cacheRead) {
+      if (!notes.cacheTokens) notes.cacheTokens = { creation: 0, read: 0 };
+      notes.cacheTokens.creation += cacheCreation;
+      notes.cacheTokens.read += cacheRead;
+    }
+  }
+
   // Extract thinking highlights via shared utility
   const anthropicMsgs: AnthropicMessage[] = messages
     .filter((m) => m.message?.content && Array.isArray(m.message.content))

@@ -20,24 +20,38 @@ import { getPreset } from '../config/index.js';
 import { fileSummary, mcpSummary, shellSummary, SummaryCollector, truncate } from '../utils/tool-summarizer.js';
 
 const GEMINI_BASE_DIR = path.join(homeDir(), '.gemini', 'tmp');
+const GEMINI_LEGACY_DIR = path.join(homeDir(), '.gemini', 'sessions');
 
 /**
- * Find all Gemini session files
+ * Find all Gemini session files (new and legacy storage formats)
  */
 async function findSessionFiles(): Promise<string[]> {
-  if (!fs.existsSync(GEMINI_BASE_DIR)) return [];
-
   const results: string[] = [];
-  for (const projectDir of listSubdirectories(GEMINI_BASE_DIR)) {
-    if (path.basename(projectDir) === 'bin') continue;
-    const chatsDir = path.join(projectDir, 'chats');
+
+  // New format: ~/.gemini/tmp/<project-hash>/chats/session-*.json
+  if (fs.existsSync(GEMINI_BASE_DIR)) {
+    for (const projectDir of listSubdirectories(GEMINI_BASE_DIR)) {
+      if (path.basename(projectDir) === 'bin') continue;
+      const chatsDir = path.join(projectDir, 'chats');
+      results.push(
+        ...findFiles(chatsDir, {
+          match: (entry) => entry.name.startsWith('session-') && entry.name.endsWith('.json'),
+          recursive: false,
+        }),
+      );
+    }
+  }
+
+  // Legacy format: ~/.gemini/sessions/*.json
+  if (fs.existsSync(GEMINI_LEGACY_DIR)) {
     results.push(
-      ...findFiles(chatsDir, {
-        match: (entry) => entry.name.startsWith('session-') && entry.name.endsWith('.json'),
+      ...findFiles(GEMINI_LEGACY_DIR, {
+        match: (entry) => entry.name.endsWith('.json'),
         recursive: false,
       }),
     );
   }
+
   return results;
 }
 

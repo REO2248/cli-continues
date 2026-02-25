@@ -12,6 +12,13 @@ export const TOOL_NAMES = Object.freeze([
   'opencode',
   'droid',
   'cursor',
+  'amp',
+  'kiro',
+  'crush',
+  'cline',
+  'roo-code',
+  'kilo-code',
+  'antigravity',
 ] as const);
 
 /** Source CLI tool — derived from TOOL_NAMES, never defined manually */
