@@ -184,6 +184,8 @@ function extractFirstUserMessage(messages: ClineRawMessage[]): string {
  */
 function buildConversation(messages: ClineRawMessage[]): ConversationMessage[] {
   const result: ConversationMessage[] = [];
+  let lastSay: string | undefined;
+  let lastPartial = false;
 
   for (const msg of messages) {
     const role = classifyRole(msg);
@@ -194,19 +196,26 @@ function buildConversation(messages: ClineRawMessage[]): ConversationMessage[] {
 
     const ts = msg.ts ? new Date(msg.ts) : undefined;
 
-    // Deduplicate: if the previous message is the same role (assistant streaming),
-    // replace it with this one (which has more complete text)
+    // Deduplicate: if the previous message is also a streaming assistant text
+    // chunk, replace it with this one (which has more complete text).
+    // Only replace when the previous was also a partial text — never overwrite
+    // reasoning or other non-streaming assistant messages.
     if (
       role === 'assistant' &&
       msg.say === 'text' &&
       msg.partial === true &&
       result.length > 0 &&
-      result[result.length - 1].role === 'assistant'
+      result[result.length - 1].role === 'assistant' &&
+      lastSay === 'text' &&
+      lastPartial === true
     ) {
       result[result.length - 1] = { role, content: text, timestamp: ts };
     } else {
       result.push({ role, content: text, timestamp: ts });
     }
+
+    lastSay = msg.say;
+    lastPartial = msg.partial === true;
   }
 
   return result;

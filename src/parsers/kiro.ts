@@ -135,7 +135,7 @@ export async function parseKiroSessions(): Promise<UnifiedSession[]> {
         lines: session.history.length,
         bytes: fileStats.size,
         // Kiro has no per-message timestamps — file mtime is the best proxy
-        createdAt: fileStats.mtime,
+        createdAt: fileStats.birthtime,
         updatedAt: fileStats.mtime,
         originalPath: filePath,
         summary,
