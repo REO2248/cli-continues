@@ -1,6 +1,6 @@
 # continues
 
-> Pick up where you left off — seamlessly continue AI coding sessions across Claude Code, Codex, Copilot, Gemini CLI, Cursor, Amp, Cline, Roo Code, Kilo Code, Kiro, Crush, OpenCode, Droid & Antigravity.
+> You hit the rate limit mid-debug. 30 messages of context — file changes, architecture decisions, half-finished refactors — and now you either wait hours or start fresh in another tool. **`continues` grabs your session from whichever AI coding tool you were using and hands it off to another one.** Conversation history, file changes, working state — all of it comes along.
 
 ```bash
 npx continues
@@ -12,358 +12,124 @@ https://github.com/user-attachments/assets/6945f3a5-bd19-45ab-9702-6df8e165a734
 [![npm version](https://img.shields.io/npm/v/continues.svg)](https://www.npmjs.com/package/continues)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Why?
+## Supported tools
 
-Have you ever hit your daily limit on Claude Code mid-debug? Or burned through your Gemini quota right when things were getting interesting?
+14 AI coding agents, any-to-any handoff:
 
-You've built up 30 messages of context — file changes, architecture decisions, debugging history. And now you either wait hours for the limit to reset, or start fresh in another tool and explain everything from scratch.
+**Claude Code** · **Codex** · **GitHub Copilot CLI** · **Gemini CLI** · **Cursor** · **Amp** · **Cline** · **Roo Code** · **Kilo Code** · **Kiro** · **Crush** · **OpenCode** · **Factory Droid** · **Antigravity**
 
-**`continues` reads your session from any supported tool, extracts the context, and injects it into whichever tool you switch to.** Your conversation history, file changes, and working directory all come along.
+That's 182 cross-tool handoff paths. Pick any source, pick any destination — it works.
 
-## Features
+## Install
 
-- 🔄 **Cross-tool handoff** — Move sessions between Claude Code, Codex, Copilot, Gemini CLI, Cursor, Amp, Cline, Roo Code, Kilo Code, Kiro, Crush, OpenCode, Droid & Antigravity
-- 🔍 **Auto-discovery** — Scans all 14 tools' session directories automatically
-- 🛠️ **Tool activity extraction** — Parses shell commands, file edits, MCP tool calls, patches, and more from every session
-- 🧠 **AI reasoning capture** — Extracts thinking blocks, agent reasoning, and model info for richer handoffs
-- 📋 **Interactive picker** — Browse, filter, and select sessions with a beautiful TUI
-- ⚡ **Quick resume** — `continues claude` / `continues codex 3` — one command, done
-- 🖥️ **Scriptable** — JSON/JSONL output, TTY detection, non-interactive mode
-- 📊 **Session stats** — `continues scan` to see everything at a glance
-- 📊 **Verbosity presets** — `minimal`/`standard`/`verbose`/`full` control over output detail
-- 🔎 **Session inspector** — `continues inspect <id>` — diagnostic view of parsing pipeline
-- ⚙️ **YAML configuration** — `.continues.yml` for per-project verbosity tuning
-
-## Installation
-
-No install needed — just run:
+No install needed — just run `npx continues`. Or install globally:
 
 ```bash
-npx continues
+npm install -g continues    # gives you `continues` and `cont`
 ```
 
-Or install globally:
+## How it works
 
-```bash
-npm install -g continues
-```
+1. **Discovery** — scans session directories for all 14 tools
+2. **Parsing** — reads each tool's native format (JSONL, JSON, SQLite, YAML — they're all different)
+3. **Extraction** — pulls recent messages, file changes, tool activity, AI reasoning
+4. **Handoff** — generates a structured context doc and injects it into the target tool
 
-Both `continues` and `cont` work as commands after global install.
-
-## Quick Start
-
-```bash
-# Interactive session picker — browse, pick, switch tools
-continues
-
-# List all sessions across every tool
-continues list
-
-# Grab a Claude session and continue it in Gemini
-continues resume abc123 --in gemini
-
-# Pass launch flags to the destination tool during cross-tool handoff
-continues resume abc123 --in codex --yolo --search --add-dir /tmp
-
-# Quick-resume your latest Claude session (native resume)
-continues claude
-```
+The handoff document is designed so the receiving agent immediately understands what you were doing, what files were touched, what commands ran, and what's left to do.
 
 ## Usage
 
-### Interactive Mode (default)
+### Interactive (default)
 
-Just run `continues`. It walks you through:
-
-1. Filter by directory, CLI tool, or browse all
-2. Pick a session
-3. Choose which CLI tool to continue in (only shows *other* tools — the whole point is switching)
-
-When you run `continues` from a project directory, it prioritizes sessions from that directory first:
+Just run `continues`. It finds all your sessions, lets you pick one, and asks where to continue:
 
 ```
 ┌  continues — pick up where you left off
 │
-│  ▸ 18 sessions found in current directory
 │  Found 1842 sessions across 14 CLI tools
-│    claude: 723  codex: 72  cursor: 68  copilot: 39  opencode: 38  droid: 71  gemini: 31
-│    amp: 84  kiro: 22  crush: 45  cline: 312  roo-code: 198  kilo-code: 56  antigravity: 83
+│    claude: 723  codex: 72  cursor: 68  copilot: 39  ...
 │
-◆  Filter sessions
-│  ● This directory (18 sessions)
-│  ○ All CLI tools (1842 sessions)
-│  ○ Claude (723)
-│  ○ Codex (72)
-│  ○ Copilot (39)
-│  ○ Droid (71)
-│  ○ Opencode (38)
-│  ○ Gemini (31)
-│  ○ Cursor (68)
-│  ○ Amp (84)
-│  ○ Kiro (22)
-│  ○ Crush (45)
-│  ○ Cline (312)
-│  ○ Roo Code (198)
-│  ○ Kilo Code (56)
-│  ○ Antigravity (83)
-└
-
-◆  Select a session (12 available)
-│  [claude]    2026-02-19 05:28  my-project    Debugging SSH tunnel config   84a36c5d
-│  [copilot]   2026-02-19 04:41  my-project    Migrate presets from Electron c2f5974c
-│  [codex]     2026-02-18 23:12  my-project    Fix OpenCode SQLite parser    a1e90b3f
+◆  Select a session
+│  [claude]   2026-02-19 05:28  my-project    Debugging SSH tunnel config   84a36c5d
+│  [copilot]  2026-02-19 04:41  my-project    Migrate presets from Electron c2f5974c
+│  [codex]    2026-02-18 23:12  my-project    Fix OpenCode SQLite parser    a1e90b3f
 │  ...
 └
 
-◆  Continue claude session in:
-│  ○ Gemini
-│  ○ Copilot
-│  ○ Codex
-│  ○ OpenCode
-│  ○ Droid
-│  ○ Cursor
-│  ○ Amp
-│  ○ Kiro
-│  ○ Crush
-│  ○ Cline
-│  ○ Roo Code
-│  ○ Kilo Code
-│  ○ Antigravity
+◆  Continue in:
+│  ○ Gemini   ○ Codex   ○ Amp   ○ Kiro   ...
 └
 ```
 
-If no sessions are found for the current directory, all sessions are shown automatically.
+When you run from a project directory, sessions from that directory are prioritized.
 
-### Non-interactive
+### Quick resume
 
-```bash
-continues list                          # List all sessions
-continues list --source claude --json   # JSON output, filtered
-continues list --jsonl -n 10            # JSONL, limit to 10
-continues scan                          # Session discovery stats
-continues rebuild                       # Force-rebuild the index
-```
-
-`list` output:
-
-```
-Found 894 sessions (showing 5):
-
-[claude]   2026-02-19 05:28  dev-test/SuperCmd     SSH tunnel config debugging         84a36c5d
-[copilot]  2026-02-19 04:41  migrate-to-tauri      Copy Presets From Electron          c2f5974c
-[codex]    2026-02-18 23:12  cli-continues         Fix OpenCode SQLite parser          a1e90b3f
-[gemini]   2026-02-18 05:10  my-project            Tauri window management             96315428
-[opencode] 2026-02-14 17:12  codex-session-picker  Where does Codex save JSON files    ses_3a2d
-```
-
-### Quick Resume
-
-Resume the Nth most recent session from a specific tool using native resume (no context injection — fastest, preserves full history):
+Skip the picker entirely — resume the Nth most recent session from a tool:
 
 ```bash
-continues claude        # Latest Claude session
-continues codex 3       # 3rd most recent Codex session
-continues copilot       # Latest Copilot session
-continues gemini 2      # 2nd most recent Gemini session
-continues opencode      # Latest OpenCode session
-continues droid         # Latest Droid session
-continues cursor        # Latest Cursor session
-continues amp           # Latest Amp session
-continues kiro          # Latest Kiro session
-continues crush         # Latest Crush session
-continues cline         # Latest Cline session
-continues roo-code      # Latest Roo Code session
-continues kilo-code     # Latest Kilo Code session
-continues antigravity   # Latest Antigravity session
+continues claude        # latest Claude session
+continues codex 3       # 3rd most recent Codex
+continues amp           # latest Amp
+continues cline         # latest Cline
+continues kiro          # latest Kiro
+continues crush         # latest Crush
 ```
 
-### Cross-tool Handoff
+Works for all 14 tools. This uses **native resume** — same tool, full history, no context injection.
 
-This is the whole point. Start in one tool, finish in another:
+### Cross-tool handoff
+
+This is the main thing. Start in one tool, finish in another:
 
 ```bash
-# You were debugging in Claude, but hit the rate limit.
-# Grab the session ID from `continues list` and hand it off:
+# Hit the Claude rate limit? Hand it off to Gemini:
 continues resume abc123 --in gemini
 
-# Or pick interactively — just run `continues`, select a session,
-# and choose a different tool as the target.
-
-# In picker flows, forward destination flags after `--`
-continues pick -- --model gpt-5 --sandbox workspace-write
+# Or pass flags through to the destination tool:
+continues resume abc123 --in codex --yolo --search --add-dir /tmp
 ```
 
-`continues` extracts your conversation context (messages, file changes, pending tasks) and injects it as a structured prompt into the target tool. The target picks up with full awareness of what you were working on.
+`continues` maps common flags (model, sandbox, auto-approve, extra dirs) to the target tool's equivalent. Anything it doesn't recognize gets passed through as-is.
 
-When forwarding flags in cross-tool mode, `continues` maps common interactive settings to the selected target tool (model, sandbox/permissions, yolo/auto-approve, extra directories, etc.). Any flag that is not mapped is passed through as-is to the destination CLI.
+### Scripting & CI
 
-## How It Works
-
-```
-1. Discovery    → Scans session directories for all 14 tools
-2. Parsing      → Reads each tool's native format (JSONL, JSON, SQLite, YAML)
-3. Extraction   → Pulls recent messages, file changes, tool activity, AI reasoning
-4. Summarizing  → Groups tool calls by type with concise one-line samples
-5. Handoff      → Generates a structured context document
-6. Injection    → Launches target tool with the context pre-loaded
+```bash
+continues list                          # table output
+continues list --source claude --json   # JSON, filtered
+continues list --jsonl -n 10            # JSONL, last 10
+continues scan                          # discovery stats
+continues scan --rebuild                # force re-index
 ```
 
-### Tool Activity Extraction
+### Inspect (for debugging)
 
-Every tool call from the source session is parsed, categorized, and summarized. The handoff document includes a **Tool Activity** section so the target tool knows exactly what was done — not just what was said.
+See exactly what gets parsed and what ends up in the handoff:
 
-Shared formatting helpers (`SummaryCollector` + per-tool formatters in `src/utils/tool-summarizer.ts`) keep summaries consistent across all 14 CLIs. Adding support for a new tool type is a one-liner.
-
-**What gets extracted per CLI:**
-
-| Tool | Extracted |
-|:-----|:----------|
-| Claude Code | Bash commands (with exit codes), Read/Write/Edit (file paths), Grep/Glob, WebFetch/WebSearch, Task/subagent dispatches, MCP tools (`mcp__*`), thinking blocks → reasoning notes |
-| Codex CLI | exec_command/shell_command (grouped by base command: `npm`, `git`, etc.), apply_patch (file paths from patch format), web_search, write_stdin, MCP resources, agent_reasoning → reasoning notes, token usage |
-| Gemini CLI | read_file/write_file (with `diffStat`: +N -M lines), thoughts → reasoning notes, model info, token usage (accumulated) |
-| Copilot CLI | Session metadata from workspace.yaml (tool calls not persisted by Copilot) |
-| OpenCode | Messages from SQLite DB or JSON fallback (tool-specific parts TBD) |
-| Factory Droid | Create/Read/Edit (file paths), Execute/Bash (shell commands), LS, MCP tools (`context7___*`, etc.), thinking blocks → reasoning notes, todo tasks, model info, token usage from companion `.settings.json` |
-| Cursor (CLI) | Bash/terminal commands, Read/Write/Edit/apply_diff (file paths), Grep/codebase_search, Glob/list_directory/file_search, WebFetch, WebSearch, Task/subagent dispatches, MCP tools (`mcp__*`), thinking blocks → reasoning notes |
-| Amp CLI | Messages and tool calls from thread JSON, shell commands, file operations, thinking blocks → reasoning notes |
-| Kiro IDE | Workspace session messages, file edits, tool invocations from session JSON |
-| Crush CLI | Messages from SQLite DB (`crush.db`), shell commands, file operations |
-| Cline | VS Code extension task JSON — shell commands, file read/write/edit, MCP tools, thinking blocks → reasoning notes |
-| Roo Code | VS Code extension task JSON (same schema as Cline) — shell commands, file operations, MCP tools |
-| Kilo Code | VS Code extension task JSON (same schema as Cline) — shell commands, file operations, MCP tools |
-| Antigravity | JSONL code tracker logs — file operations, shell commands, session metadata |
-
-**Example handoff output:**
-
-```markdown
-## Tool Activity
-- **Bash** (×47): `$ npm test → exit 0` · `$ git status → exit 0` · `$ npm run build → exit 1`
-- **Edit** (×12): `edit src/auth.ts` · `edit src/api/routes.ts` · `edit tests/auth.test.ts`
-- **Grep** (×8): `grep "handleLogin" src/` · `grep "JWT_SECRET"` · `grep "middleware"`
-- **apply_patch** (×5): `patch: src/utils/db.ts, src/models/user.ts`
-
-## Session Notes
-- **Model**: claude-sonnet-4
-- **Tokens**: 45,230 input, 12,847 output
-- 💭 Need to handle the edge case where token refresh races with logout
-- 💭 The middleware chain order matters — auth must come before rate limiting
+```bash
+continues inspect abc123                              # diagnostic view
+continues inspect abc123 --preset full --write-md handoff.md   # dump full markdown
+continues inspect abc123 --truncate 50                # compact one-liner view
 ```
 
-### Session Storage
+## Verbosity control
 
-`continues` reads session data from each tool's native storage. Read-only — it doesn't modify or copy anything.
+Not every handoff needs to be a novel. Four presets control how much detail goes in:
 
-| Tool | Location | Format |
-|:-----|:---------|:-------|
-| Claude Code | `~/.claude/projects/` | JSONL |
-| GitHub Copilot | `~/.copilot/session-state/` | YAML + JSONL |
-| Google Gemini CLI | `~/.gemini/tmp/*/chats/` | JSON |
-| OpenAI Codex | `~/.codex/sessions/` | JSONL |
-| OpenCode | `~/.local/share/opencode/storage/` | SQLite |
-| Factory Droid | `~/.factory/sessions/` | JSONL + JSON |
-| Cursor (CLI) | `~/.cursor/projects/*/agent-transcripts/` | JSONL |
-| Amp | `~/.local/share/amp/threads/` | JSON |
-| Kiro | `~/Library/Application Support/Kiro/workspace-sessions/` | JSON |
-| Crush | `~/.crush/crush.db` | SQLite |
-| Cline | VS Code `globalStorage/saoudrizwan.claude-dev/tasks/` | JSON |
-| Roo Code | VS Code `globalStorage/rooveterinaryinc.roo-cline/tasks/` | JSON |
-| Kilo Code | VS Code `globalStorage/kilocode.kilo-code/tasks/` | JSON |
-| Antigravity | `~/.gemini/antigravity/code_tracker/` | JSONL |
-
-Session index cached at `~/.continues/sessions.jsonl`. Auto-refreshes when stale (5 min TTL).
-
-## Commands
-
-```
-continues                           Interactive TUI picker (default)
-continues list                      List all sessions
-continues resume <id>               Resume by session ID
-continues resume <id> --in <tool>   Cross-tool handoff
-continues inspect <id>              Diagnostic view of parsing pipeline
-continues scan                      Session discovery statistics
-continues rebuild                   Force-rebuild session index
-continues <tool> [n]                Quick-resume Nth session from tool
-```
-
-### Global Options
-
-| Flag | Description |
-|:-----|:------------|
-| `--config <path>` | Path to a `.continues.yml` config file |
-| `--preset <name>` | Verbosity preset: `minimal`, `standard`, `verbose`, `full` |
-
-### `continues` / `continues pick`
-
-Interactive session picker. Requires a TTY.
-
-| Flag | Description |
-|:-----|:------------|
-| `-s, --source <tool>` | Pre-filter to one tool |
-| `--no-tui` | Disable interactive mode |
-| `--rebuild` | Force-rebuild index first |
-| `-- ...` | Forward raw launch flags to selected destination tool |
-
-### `continues list` (alias: `ls`)
-
-| Flag | Description | Default |
-|:-----|:------------|:--------|
-| `-s, --source <tool>` | Filter by tool | all |
-| `-n, --limit <number>` | Max sessions to show | 50 |
-| `--json` | Output as JSON array | — |
-| `--jsonl` | Output as JSONL | — |
-| `--rebuild` | Force-rebuild index first | — |
-
-### `continues resume <id>` (alias: `r`)
-
-| Flag | Description | Default |
-|:-----|:------------|:--------|
-| `-i, --in <tool>` | Target tool for cross-tool handoff | — |
-| `--preset <name>` | Verbosity preset for handoff generation | `standard` |
-| `--no-tui` | Skip interactive prompts | — |
-| `...` unknown flags | In cross-tool mode, map common flags and pass unmapped ones directly to destination CLI | — |
-
-### `continues inspect <id>`
-
-Diagnostic command that runs the full parsing pipeline and outputs detailed statistics — what was parsed, how much made it into the markdown, and conversion efficiency.
-
-| Flag | Description | Default |
-|:-----|:------------|:--------|
-| `--preset <name>` | Verbosity preset to use for inspection | `standard` |
-| `--truncate <n>` | Truncate long values to N characters | — |
-| `--write-md <path>` | Write the generated handoff markdown to a file | — |
-
-### `continues scan`
-
-| Flag | Description |
-|:-----|:------------|
-| `--rebuild` | Force-rebuild index first |
-
-### `continues <tool> [n]`
-
-Quick-resume using native resume (same tool, no context injection).  
-Tools: `claude`, `codex`, `copilot`, `gemini`, `opencode`, `droid`, `cursor`, `amp`, `kiro`, `crush`, `cline`, `roo-code`, `kilo-code`, `antigravity`. Default `n` is 1.
-
-## Verbosity Configuration
-
-Control how much detail goes into handoff documents with presets or YAML config.
-
-### Presets
-
-| Preset | Recent Messages | Tool Samples | Subagent Detail | Use Case |
-|:-------|:----------------|:-------------|:----------------|:---------|
-| `minimal` | 3 | 0 | None | Quick context, small handoffs |
-| `standard` | 10 | 5 | 500 chars | Default, balanced |
-| `verbose` | 20 | 10 | 2000 chars | Detailed debugging |
-| `full` | 50 | All | Full | Complete session capture |
+| Preset | Messages | Tool samples | Subagent detail | When to use |
+|:-------|:---------|:-------------|:----------------|:------------|
+| `minimal` | 3 | 0 | None | Quick context, token-constrained targets |
+| `standard` | 10 | 5 | 500 chars | Default — good balance |
+| `verbose` | 20 | 10 | 2000 chars | Debugging, complex multi-file tasks |
+| `full` | 50 | All | Everything | Complete session capture |
 
 ```bash
 continues resume abc123 --preset full
-continues inspect abc123 --preset verbose --write-md handoff.md
 ```
 
-### YAML Config
+### YAML config
 
-Create `.continues.yml` in your project root:
+For per-project defaults, drop a `.continues.yml` in your project root:
 
 ```yaml
 preset: verbose
@@ -373,43 +139,84 @@ shell:
   stdoutLines: 20
 ```
 
-Config resolution order:
-1. Explicit `--config <path>` CLI flag
-2. `.continues.yml` in current directory
-3. `~/.continues/config.yml`
-4. `standard` preset (built-in default)
+Resolution order: `--config <path>` → `.continues.yml` in cwd → `~/.continues/config.yml` → `standard` preset. See `.continues.example.yml` for the full reference.
 
-See `.continues.example.yml` for a fully annotated reference.
+## What gets extracted
 
-## Conversion Matrix
+Every tool stores sessions differently — different formats, different schemas, different paths. Here's what `continues` reads:
 
-All 182 cross-tool paths are supported and tested:
+| Tool | Format | Where it lives |
+|:-----|:-------|:---------------|
+| Claude Code | JSONL | `~/.claude/projects/` |
+| Codex | JSONL | `~/.codex/sessions/` |
+| Copilot | YAML + JSONL | `~/.copilot/session-state/` |
+| Gemini CLI | JSON | `~/.gemini/tmp/*/chats/` |
+| OpenCode | SQLite | `~/.local/share/opencode/storage/` |
+| Factory Droid | JSONL + JSON | `~/.factory/sessions/` |
+| Cursor | JSONL | `~/.cursor/projects/*/agent-transcripts/` |
+| Amp | JSON | `~/.local/share/amp/threads/` |
+| Kiro | JSON | `~/Library/Application Support/Kiro/workspace-sessions/` |
+| Crush | SQLite | `~/.crush/crush.db` |
+| Cline | JSON | VS Code `globalStorage/saoudrizwan.claude-dev/tasks/` |
+| Roo Code | JSON | VS Code `globalStorage/rooveterinaryinc.roo-cline/tasks/` |
+| Kilo Code | JSON | VS Code `globalStorage/kilocode.kilo-code/tasks/` |
+| Antigravity | JSONL | `~/.gemini/antigravity/code_tracker/` |
 
-|  | → Cld | → Cdx | → Cop | → Gem | → OC | → Drd | → Cur | → Amp | → Kir | → Cru | → Cln | → Roo | → Kilo | → AG |
-|:--|:-----:|:-----:|:-----:|:-----:|:----:|:-----:|:-----:|:-----:|:-----:|:-----:|:-----:|:-----:|:------:|:----:|
-| **Claude** | — | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Codex** | ✅ | — | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Copilot** | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Gemini** | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **OpenCode** | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Droid** | ✅ | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Cursor** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Amp** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Kiro** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Crush** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ |
-| **Cline** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ |
-| **Roo Code** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ |
-| **Kilo Code** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | ✅ |
-| **Antigravity** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+All reads are **read-only** — `continues` never modifies your session files. Index cached at `~/.continues/sessions.jsonl` (5-min TTL, auto-refresh).
 
-<sub>Cld = Claude, Cdx = Codex, Cop = Copilot, Gem = Gemini, OC = OpenCode, Drd = Droid, Cur = Cursor, AG = Antigravity</sub>
+### Tool activity in handoffs
 
-Same-tool resume is available via `continues <tool>` shortcuts (native resume, not shown in matrix).
+The handoff document includes a **Tool Activity** section so the target agent knows what was *done*, not just what was *said*:
+
+```markdown
+## Tool Activity
+- **Bash** (×47): `$ npm test → exit 0` · `$ git status → exit 0` · `$ npm run build → exit 1`
+- **Edit** (×12): `edit src/auth.ts` · `edit src/api/routes.ts` · `edit tests/auth.test.ts`
+- **Grep** (×8): `grep "handleLogin" src/` · `grep "JWT_SECRET"` · `grep "middleware"`
+
+## Session Notes
+- **Model**: claude-sonnet-4
+- **Tokens**: 45,230 in / 12,847 out
+- 💭 Need to handle the edge case where token refresh races with logout
+```
+
+This works for all 14 tools — bash commands, file reads/writes/edits, grep/glob, MCP tool calls, thinking blocks, subagent dispatches, token usage, model info. The shared `SummaryCollector` keeps the format consistent regardless of source.
+
+## Commands reference
+
+| Command | What it does |
+|:--------|:-------------|
+| `continues` | Interactive TUI picker |
+| `continues list` | List sessions (`--source`, `--json`, `--jsonl`, `-n`) |
+| `continues resume <id>` | Resume by ID (`--in <tool>`, `--preset`) |
+| `continues inspect <id>` | Diagnostic view (`--truncate`, `--write-md`, `--preset`) |
+| `continues scan` | Discovery stats (`--rebuild`) |
+| `continues rebuild` | Force-rebuild session index |
+| `continues <tool> [n]` | Quick-resume Nth session from any of the 14 tools |
+
+Global flags: `--config <path>`, `--preset <name>`, `--verbose`, `--debug`
+
+## Community contributions
+
+This started as a 7-tool project and grew fast thanks to contributors:
+
+- **Factory Droid support** — [#1](https://github.com/yigitkonur/cli-continues/pull/1), first community parser
+- **Cursor AI support** — [#4](https://github.com/yigitkonur/cli-continues/pull/4) by [@Evrim267](https://github.com/Evrim267), with smart slug-to-path resolution
+- **Single-tool error handling** — [#3](https://github.com/yigitkonur/cli-continues/pull/3) by [@barisgirismen](https://github.com/barisgirismen), clear error when only one CLI is installed
+- **Env var overrides** — [#14](https://github.com/yigitkonur/cli-continues/pull/14) by [@yutakobayashidev](https://github.com/yutakobayashidev), respects `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME`, `XDG_DATA_HOME`
+
+The latest batch — **Amp, Kiro, Crush, Cline, Roo Code, Kilo Code, and Antigravity** — was added by reverse-engineering [mnemo](https://github.com/Pilan-AI/mnemo)'s Go adapters and adapting the schemas for TypeScript. Along the way we also improved token/cache/model extraction for the existing Claude, Codex, Cursor, and Gemini parsers.
+
+**Bugs fixed in this round:**
+- Symlink traversal — `fs.Dirent.isDirectory()` returns `false` for symlinks; fixed with `isSymbolicLink() && statSync()` fallback
+- Zero-token display — no longer shows "0 in / 0 out" when a session has no token data
+- Key Decisions count — now respects the verbosity config instead of being hardcoded to 5
 
 ## Requirements
 
-- **Node.js 22+** (uses built-in `node:sqlite` for OpenCode and Crush parsing)
-- At least one of: Claude Code, Codex, GitHub Copilot, Gemini CLI, OpenCode, Factory Droid, Cursor, Amp, Kiro, Crush, Cline, Roo Code, Kilo Code, or Antigravity
+- **Node.js 22+** (uses built-in `node:sqlite` for OpenCode and Crush)
+- At least one of the 14 supported tools installed
+- `sqlite3` CLI binary (only needed for Crush — ships with macOS)
 
 ## Development
 
@@ -418,11 +225,13 @@ git clone https://github.com/yigitkonur/cli-continues
 cd cli-continues
 pnpm install
 
-pnpm run dev          # Run with tsx (no build needed)
-pnpm run build        # Compile TypeScript
-pnpm test             # Run 122 tests
-pnpm run test:watch   # Watch mode
+pnpm run dev          # run with tsx, no build needed
+pnpm run build        # compile TypeScript
+pnpm test             # run tests
+pnpm run test:watch   # watch mode
 ```
+
+Adding a new tool? Create a parser in `src/parsers/`, add the tool name to `src/types/tool-names.ts`, register it in `src/parsers/registry.ts`. The registry has a compile-time completeness check — if you add a name but forget the parser, it throws at import.
 
 ## License
 
