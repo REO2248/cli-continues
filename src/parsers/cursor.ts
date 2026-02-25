@@ -5,10 +5,12 @@ import type { ConversationMessage, SessionContext, SessionNotes, UnifiedSession 
 import type { CursorTranscriptLine } from '../types/schemas.js';
 import { cleanUserQueryText, isRealUserMessage, isSystemContent } from '../utils/content.js';
 import { findFiles } from '../utils/fs-helpers.js';
-import { readJsonlFile, scanJsonlHead } from '../utils/jsonl.js';
+import { getFileStats, readJsonlFile, scanJsonlHead } from '../utils/jsonl.js';
 import { generateHandoffMarkdown } from '../utils/markdown.js';
 import { cleanSummary, extractRepoFromCwd, homeDir } from '../utils/parser-helpers.js';
 import { cwdFromSlug } from '../utils/slug.js';
+import type { VerbosityConfig } from '../config/index.js';
+import { getPreset } from '../config/index.js';
 import {
   type AnthropicMessage,
   extractAnthropicToolData,
@@ -65,13 +67,12 @@ function getSessionId(filePath: string): string {
 async function parseSessionInfo(filePath: string): Promise<{
   firstUserMessage: string;
   lineCount: number;
+  bytes: number;
 }> {
   let firstUserMessage = '';
-  let lineCount = 0;
 
-  // Count all lines
-  const lines = await readJsonlFile(filePath);
-  lineCount = lines.length;
+  // Stream-count lines without full JSON parse (fast)
+  const stats = await getFileStats(filePath);
 
   // Scan head for first user message
   await scanJsonlHead(filePath, 50, (parsed) => {
@@ -91,7 +92,7 @@ async function parseSessionInfo(filePath: string): Promise<{
     return 'continue';
   });
 
-  return { firstUserMessage, lineCount };
+  return { firstUserMessage, lineCount: stats.lines, bytes: stats.bytes };
 }
 
 /**
@@ -103,7 +104,7 @@ export async function parseCursorSessions(): Promise<UnifiedSession[]> {
 
   for (const filePath of files) {
     try {
-      const { firstUserMessage, lineCount } = await parseSessionInfo(filePath);
+      const { firstUserMessage, lineCount, bytes } = await parseSessionInfo(filePath);
       const fileStats = fs.statSync(filePath);
       const slug = getProjectSlug(filePath);
       const cwd = cwdFromSlug(slug);
@@ -116,7 +117,7 @@ export async function parseCursorSessions(): Promise<UnifiedSession[]> {
         cwd,
         repo: extractRepoFromCwd(cwd),
         lines: lineCount,
-        bytes: fileStats.size,
+        bytes,
         createdAt: fileStats.birthtime,
         updatedAt: fileStats.mtime,
         originalPath: filePath,
@@ -134,7 +135,8 @@ export async function parseCursorSessions(): Promise<UnifiedSession[]> {
 /**
  * Extract context from a Cursor session for cross-tool continuation
  */
-export async function extractCursorContext(session: UnifiedSession): Promise<SessionContext> {
+export async function extractCursorContext(session: UnifiedSession, config?: VerbosityConfig): Promise<SessionContext> {
+  const resolvedConfig = config ?? getPreset('standard');
   const lines = await readJsonlFile<CursorTranscriptLine>(session.originalPath);
   const recentMessages: ConversationMessage[] = [];
 
@@ -144,12 +146,44 @@ export async function extractCursorContext(session: UnifiedSession): Promise<Ses
     content: l.message.content,
   }));
 
-  const { summaries: toolSummaries, filesModified } = extractAnthropicToolData(anthropicMsgs);
+  const { summaries: toolSummaries, filesModified } = extractAnthropicToolData(anthropicMsgs, resolvedConfig);
 
-  // Extract session notes (thinking highlights)
+  // Extract session notes (thinking highlights + token usage)
   const sessionNotes: SessionNotes = {};
   const reasoning = extractThinkingHighlights(anthropicMsgs);
   if (reasoning.length > 0) sessionNotes.reasoning = reasoning;
+
+  // Aggregate token usage, cache tokens, and model from passthrough fields.
+  // Cursor CLI agent-transcripts use Anthropic API format — the schema's
+  // .passthrough() preserves `usage` and `model` on each JSONL line.
+  for (const line of lines) {
+    if (line.role !== 'assistant') continue;
+    const raw = line as Record<string, unknown>;
+
+    // Model: take the first one found (all lines in a session use the same model)
+    const model = (raw.model ?? (raw.message as Record<string, unknown> | undefined)?.model) as string | undefined;
+    if (model && !sessionNotes.model) {
+      sessionNotes.model = model;
+    }
+
+    // Usage may be at top level or nested under message (both observed in the wild)
+    const usage = (raw.usage ?? (raw.message as Record<string, unknown> | undefined)?.usage) as
+      | Record<string, number>
+      | undefined;
+    if (!usage) continue;
+
+    if (!sessionNotes.tokenUsage) sessionNotes.tokenUsage = { input: 0, output: 0 };
+    sessionNotes.tokenUsage.input += usage.input_tokens || 0;
+    sessionNotes.tokenUsage.output += usage.output_tokens || 0;
+
+    const cacheCreation = usage.cache_creation_input_tokens || 0;
+    const cacheRead = usage.cache_read_input_tokens || 0;
+    if (cacheCreation || cacheRead) {
+      if (!sessionNotes.cacheTokens) sessionNotes.cacheTokens = { creation: 0, read: 0 };
+      sessionNotes.cacheTokens.creation += cacheCreation;
+      sessionNotes.cacheTokens.read += cacheRead;
+    }
+  }
 
   const pendingTasks: string[] = [];
 
@@ -172,9 +206,9 @@ export async function extractCursorContext(session: UnifiedSession): Promise<Ses
     });
   }
 
-  const trimmed = recentMessages.slice(-10);
+  const trimmed = recentMessages.slice(-resolvedConfig.recentMessages);
 
-  const markdown = generateHandoffMarkdown(session, trimmed, filesModified, pendingTasks, toolSummaries, sessionNotes);
+  const markdown = generateHandoffMarkdown(session, trimmed, filesModified, pendingTasks, toolSummaries, sessionNotes, resolvedConfig);
 
   return {
     session,

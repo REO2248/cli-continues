@@ -1,5 +1,6 @@
 import chalk from 'chalk';
 import type { SessionContext, SessionSource, UnifiedSession } from '../types/index.js';
+import type { VerbosityConfig } from '../config/index.js';
 import { TOOL_NAMES } from '../types/tool-names.js';
 import {
   type FlagOccurrence,
@@ -15,6 +16,15 @@ import { extractCursorContext, parseCursorSessions } from './cursor.js';
 import { extractDroidContext, parseDroidSessions } from './droid.js';
 import { extractGeminiContext, parseGeminiSessions } from './gemini.js';
 import { extractOpenCodeContext, parseOpenCodeSessions } from './opencode.js';
+import { extractAmpContext, parseAmpSessions } from './amp.js';
+import { extractKiroContext, parseKiroSessions } from './kiro.js';
+import { extractCrushContext, parseCrushSessions } from './crush.js';
+import {
+  extractClineContext, parseClineSessions,
+  extractRooCodeContext, parseRooCodeSessions,
+  extractKiloCodeContext, parseKiloCodeSessions,
+} from './cline.js';
+import { extractAntigravityContext, parseAntigravitySessions } from './antigravity.js';
 
 /**
  * Adapter interface — single contract for all supported CLI tools.
@@ -29,12 +39,14 @@ export interface ToolAdapter {
   color: (s: string) => string;
   /** Storage directory path (for help text) */
   storagePath: string;
+  /** Environment variable that overrides the default storage path (if any) */
+  envVar?: string;
   /** CLI binary name for availability checks and spawning */
   binaryName: string;
   /** Discover and index all sessions */
   parseSessions: () => Promise<UnifiedSession[]>;
   /** Extract full context for cross-tool handoff */
-  extractContext: (session: UnifiedSession) => Promise<SessionContext>;
+  extractContext: (session: UnifiedSession, config?: VerbosityConfig) => Promise<SessionContext>;
   /** CLI args to resume a session natively */
   nativeResumeArgs: (session: UnifiedSession) => string[];
   /** CLI args to start with a handoff prompt */
@@ -377,6 +389,7 @@ register({
   label: 'Claude Code',
   color: chalk.blue,
   storagePath: '~/.claude/projects/',
+  envVar: 'CLAUDE_CONFIG_DIR',
   binaryName: 'claude',
   parseSessions: parseClaudeSessions,
   extractContext: extractClaudeContext,
@@ -392,6 +405,7 @@ register({
   label: 'Codex CLI',
   color: chalk.magenta,
   storagePath: '~/.codex/sessions/',
+  envVar: 'CODEX_HOME',
   binaryName: 'codex',
   parseSessions: parseCodexSessions,
   extractContext: extractCodexContext,
@@ -422,6 +436,7 @@ register({
   label: 'Gemini CLI',
   color: chalk.cyan,
   storagePath: '~/.gemini/tmp/*/chats/',
+  envVar: 'GEMINI_CLI_HOME',
   binaryName: 'gemini',
   parseSessions: parseGeminiSessions,
   extractContext: extractGeminiContext,
@@ -437,6 +452,7 @@ register({
   label: 'OpenCode',
   color: chalk.yellow,
   storagePath: '~/.local/share/opencode/storage/',
+  envVar: 'XDG_DATA_HOME',
   binaryName: 'opencode',
   parseSessions: parseOpenCodeSessions,
   extractContext: extractOpenCodeContext,
@@ -474,6 +490,106 @@ register({
   crossToolArgs: (prompt) => [prompt],
   resumeCommandDisplay: (s) => `agent --resume ${s.id}`,
   mapHandoffFlags: mapCursorAgentFlags,
+});
+
+// ── Amp CLI ──────────────────────────────────────────────────────────
+register({
+  name: 'amp',
+  label: 'Amp CLI',
+  color: chalk.hex('#FF6B35'),
+  storagePath: '~/.local/share/amp/threads/',
+  envVar: 'XDG_DATA_HOME',
+  binaryName: 'amp',
+  parseSessions: parseAmpSessions,
+  extractContext: extractAmpContext,
+  nativeResumeArgs: (s) => ['--thread', s.id],
+  crossToolArgs: (prompt) => [prompt],
+  resumeCommandDisplay: (s) => `amp --thread ${s.id}`,
+});
+
+// ── Kiro IDE ─────────────────────────────────────────────────────────
+register({
+  name: 'kiro',
+  label: 'Kiro IDE',
+  color: chalk.hex('#7B68EE'),
+  storagePath: '~/Library/Application Support/Kiro/workspace-sessions/',
+  binaryName: 'kiro',
+  parseSessions: parseKiroSessions,
+  extractContext: extractKiroContext,
+  nativeResumeArgs: () => [],
+  crossToolArgs: (prompt) => [prompt],
+  resumeCommandDisplay: () => `kiro`,
+});
+
+// ── Crush CLI ────────────────────────────────────────────────────────
+register({
+  name: 'crush',
+  label: 'Crush CLI',
+  color: chalk.hex('#E63946'),
+  storagePath: '~/.crush/crush.db',
+  binaryName: 'crush',
+  parseSessions: parseCrushSessions,
+  extractContext: extractCrushContext,
+  nativeResumeArgs: (s) => ['--session', s.id],
+  crossToolArgs: (prompt) => [prompt],
+  resumeCommandDisplay: (s) => `crush --session ${s.id}`,
+});
+
+// ── Cline ────────────────────────────────────────────────────────────
+register({
+  name: 'cline',
+  label: 'Cline',
+  color: chalk.hex('#00D4AA'),
+  storagePath: '~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/',
+  binaryName: 'code',
+  parseSessions: parseClineSessions,
+  extractContext: extractClineContext,
+  nativeResumeArgs: () => [],
+  crossToolArgs: (prompt) => [prompt],
+  resumeCommandDisplay: () => `code`,
+});
+
+// ── Roo Code ─────────────────────────────────────────────────────────
+register({
+  name: 'roo-code',
+  label: 'Roo Code',
+  color: chalk.hex('#FF8C42'),
+  storagePath: '~/Library/Application Support/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/',
+  binaryName: 'code',
+  parseSessions: parseRooCodeSessions,
+  extractContext: extractRooCodeContext,
+  nativeResumeArgs: () => [],
+  crossToolArgs: (prompt) => [prompt],
+  resumeCommandDisplay: () => `code`,
+});
+
+// ── Kilo Code ────────────────────────────────────────────────────────
+register({
+  name: 'kilo-code',
+  label: 'Kilo Code',
+  color: chalk.hex('#6C5CE7'),
+  storagePath: '~/Library/Application Support/Code/User/globalStorage/kilocode.kilo-code/tasks/',
+  binaryName: 'code',
+  parseSessions: parseKiloCodeSessions,
+  extractContext: extractKiloCodeContext,
+  nativeResumeArgs: () => [],
+  crossToolArgs: (prompt) => [prompt],
+  resumeCommandDisplay: () => `code`,
+});
+
+// ── Antigravity ──────────────────────────────────────────────────────
+register({
+  name: 'antigravity',
+  label: 'Antigravity',
+  color: chalk.hex('#A8DADC'),
+  storagePath: '~/.gemini/antigravity/code_tracker/',
+  envVar: 'GEMINI_CLI_HOME',
+  binaryName: 'antigravity',
+  parseSessions: parseAntigravitySessions,
+  extractContext: extractAntigravityContext,
+  nativeResumeArgs: () => [],
+  crossToolArgs: (prompt) => [prompt],
+  resumeCommandDisplay: () => `antigravity`,
 });
 
 // ── Completeness assertion ──────────────────────────────────────────

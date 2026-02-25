@@ -15,29 +15,44 @@ import { findFiles, listSubdirectories } from '../utils/fs-helpers.js';
 import { generateHandoffMarkdown } from '../utils/markdown.js';
 import { cleanSummary, homeDir } from '../utils/parser-helpers.js';
 import { classifyToolName } from '../types/tool-names.js';
+import type { VerbosityConfig } from '../config/index.js';
+import { getPreset } from '../config/index.js';
 import { fileSummary, mcpSummary, shellSummary, SummaryCollector, truncate } from '../utils/tool-summarizer.js';
 
-const GEMINI_BASE_DIR = process.env.GEMINI_CLI_HOME
-  ? path.join(process.env.GEMINI_CLI_HOME, '.gemini', 'tmp')
-  : path.join(homeDir(), '.gemini', 'tmp');
+const geminiHome = process.env.GEMINI_CLI_HOME || homeDir();
+const GEMINI_BASE_DIR = path.join(geminiHome, '.gemini', 'tmp');
+const GEMINI_LEGACY_DIR = path.join(geminiHome, '.gemini', 'sessions');
 
 /**
- * Find all Gemini session files
+ * Find all Gemini session files (new and legacy storage formats)
  */
 async function findSessionFiles(): Promise<string[]> {
-  if (!fs.existsSync(GEMINI_BASE_DIR)) return [];
-
   const results: string[] = [];
-  for (const projectDir of listSubdirectories(GEMINI_BASE_DIR)) {
-    if (path.basename(projectDir) === 'bin') continue;
-    const chatsDir = path.join(projectDir, 'chats');
+
+  // New format: ~/.gemini/tmp/<project-hash>/chats/session-*.json
+  if (fs.existsSync(GEMINI_BASE_DIR)) {
+    for (const projectDir of listSubdirectories(GEMINI_BASE_DIR)) {
+      if (path.basename(projectDir) === 'bin') continue;
+      const chatsDir = path.join(projectDir, 'chats');
+      results.push(
+        ...findFiles(chatsDir, {
+          match: (entry) => entry.name.startsWith('session-') && entry.name.endsWith('.json'),
+          recursive: false,
+        }),
+      );
+    }
+  }
+
+  // Legacy format: ~/.gemini/sessions/*.json
+  if (fs.existsSync(GEMINI_LEGACY_DIR)) {
     results.push(
-      ...findFiles(chatsDir, {
-        match: (entry) => entry.name.startsWith('session-') && entry.name.endsWith('.json'),
+      ...findFiles(GEMINI_LEGACY_DIR, {
+        match: (entry) => entry.name.endsWith('.json'),
         recursive: false,
       }),
     );
   }
+
   return results;
 }
 
@@ -79,8 +94,8 @@ function extractFirstUserMessage(session: GeminiSession): string {
 /**
  * Extract tool usage summaries and files modified using shared SummaryCollector
  */
-function extractToolData(sessionData: GeminiSession): { summaries: ToolUsageSummary[]; filesModified: string[] } {
-  const collector = new SummaryCollector();
+function extractToolData(sessionData: GeminiSession, config?: VerbosityConfig): { summaries: ToolUsageSummary[]; filesModified: string[] } {
+  const collector = new SummaryCollector(config);
 
   for (const msg of sessionData.messages) {
     if (msg.type !== 'gemini' || !msg.toolCalls) continue;
@@ -330,7 +345,8 @@ export async function parseGeminiSessions(): Promise<UnifiedSession[]> {
 /**
  * Extract context from a Gemini session for cross-tool continuation
  */
-export async function extractGeminiContext(session: UnifiedSession): Promise<SessionContext> {
+export async function extractGeminiContext(session: UnifiedSession, config?: VerbosityConfig): Promise<SessionContext> {
+  const resolvedConfig = config ?? getPreset('standard');
   const sessionData = parseSessionFile(session.originalPath);
   const recentMessages: ConversationMessage[] = [];
   let filesModified: string[] = [];
@@ -339,12 +355,12 @@ export async function extractGeminiContext(session: UnifiedSession): Promise<Ses
   let sessionNotes: SessionNotes | undefined;
 
   if (sessionData) {
-    const toolData = extractToolData(sessionData);
+    const toolData = extractToolData(sessionData, resolvedConfig);
     toolSummaries = toolData.summaries;
     filesModified = toolData.filesModified;
     sessionNotes = extractSessionNotes(sessionData);
 
-    for (const msg of sessionData.messages.slice(-20)) {
+    for (const msg of sessionData.messages.slice(-resolvedConfig.recentMessages * 2)) {
       // Extract pending tasks from thoughts
       if (msg.type === 'gemini' && msg.thoughts && pendingTasks.length < 5) {
         for (const thought of msg.thoughts) {
@@ -384,18 +400,21 @@ export async function extractGeminiContext(session: UnifiedSession): Promise<Ses
     }
   }
 
+  const trimmed = recentMessages.slice(-resolvedConfig.recentMessages);
+
   const markdown = generateHandoffMarkdown(
     session,
-    recentMessages.slice(-10),
+    trimmed,
     filesModified,
     pendingTasks,
     toolSummaries,
     sessionNotes,
+    resolvedConfig,
   );
 
   return {
     session: sessionNotes?.model ? { ...session, model: sessionNotes.model } : session,
-    recentMessages: recentMessages.slice(-10),
+    recentMessages: trimmed,
     filesModified,
     pendingTasks,
     toolSummaries,

@@ -13,6 +13,13 @@ import {
   extractDroidContext,
   extractGeminiContext,
   extractOpenCodeContext,
+  extractAmpContext,
+  extractKiroContext,
+  extractCrushContext,
+  extractClineContext,
+  extractRooCodeContext,
+  extractKiloCodeContext,
+  extractAntigravityContext,
   parseClaudeSessions,
   parseCodexSessions,
   parseCopilotSessions,
@@ -20,13 +27,20 @@ import {
   parseDroidSessions,
   parseGeminiSessions,
   parseOpenCodeSessions,
+  parseAmpSessions,
+  parseKiroSessions,
+  parseCrushSessions,
+  parseClineSessions,
+  parseRooCodeSessions,
+  parseKiloCodeSessions,
+  parseAntigravitySessions,
 } from '../parsers/index.js';
 import type { SessionContext, SessionSource, UnifiedSession } from '../types/index.js';
 
 const RESULTS_DIR = path.join(process.env.HOME || '~', '.continues', 'e2e-test-results');
 fs.mkdirSync(RESULTS_DIR, { recursive: true });
 
-const ALL_SOURCES: SessionSource[] = ['claude', 'copilot', 'gemini', 'codex', 'opencode', 'droid', 'cursor'];
+const ALL_SOURCES: SessionSource[] = ['claude', 'copilot', 'gemini', 'codex', 'opencode', 'droid', 'cursor', 'amp', 'kiro', 'crush', 'cline', 'roo-code', 'kilo-code', 'antigravity'];
 
 const parsers: Record<SessionSource, () => Promise<UnifiedSession[]>> = {
   claude: parseClaudeSessions,
@@ -36,6 +50,13 @@ const parsers: Record<SessionSource, () => Promise<UnifiedSession[]>> = {
   opencode: parseOpenCodeSessions,
   droid: parseDroidSessions,
   cursor: parseCursorSessions,
+  amp: parseAmpSessions,
+  kiro: parseKiroSessions,
+  crush: parseCrushSessions,
+  cline: parseClineSessions,
+  'roo-code': parseRooCodeSessions,
+  'kilo-code': parseKiloCodeSessions,
+  antigravity: parseAntigravitySessions,
 };
 
 const extractors: Record<SessionSource, (s: UnifiedSession) => Promise<SessionContext>> = {
@@ -46,6 +67,13 @@ const extractors: Record<SessionSource, (s: UnifiedSession) => Promise<SessionCo
   opencode: extractOpenCodeContext,
   droid: extractDroidContext,
   cursor: extractCursorContext,
+  amp: extractAmpContext,
+  kiro: extractKiroContext,
+  crush: extractCrushContext,
+  cline: extractClineContext,
+  'roo-code': extractRooCodeContext,
+  'kilo-code': extractKiloCodeContext,
+  antigravity: extractAntigravityContext,
 };
 
 async function main() {

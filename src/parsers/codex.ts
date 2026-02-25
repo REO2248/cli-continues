@@ -14,6 +14,8 @@ import { getFileStats, readJsonlFile, scanJsonlHead } from '../utils/jsonl.js';
 import { generateHandoffMarkdown } from '../utils/markdown.js';
 import { cleanSummary, extractRepo, homeDir } from '../utils/parser-helpers.js';
 import { countDiffStats, extractStdoutTail } from '../utils/diff.js';
+import type { VerbosityConfig } from '../config/index.js';
+import { getPreset } from '../config/index.js';
 import {
   extractExitCode,
   mcpSummary,
@@ -196,8 +198,8 @@ function trackShellFileWrites(cmd: string, collector: SummaryCollector): void {
 /**
  * Extract tool usage summaries and files modified using shared SummaryCollector
  */
-function extractToolData(messages: CodexMessage[]): { summaries: ToolUsageSummary[]; filesModified: string[] } {
-  const collector = new SummaryCollector();
+function extractToolData(messages: CodexMessage[], config?: VerbosityConfig): { summaries: ToolUsageSummary[]; filesModified: string[] } {
+  const collector = new SummaryCollector(config);
   const outputsById = new Map<string, string>();
 
   // First pass: collect function_call_output and custom_tool_call_output by call_id
@@ -370,6 +372,11 @@ function extractSessionNotes(messages: CodexMessage[]): SessionNotes {
     // Token usage (take last value — cumulative)
     if (payload.type === 'token_count') {
       notes.tokenUsage = { input: payload.input_tokens || 0, output: payload.output_tokens || 0 };
+      // Codex may report reasoning tokens separately (OpenAI o-series models)
+      const reasoningTokens = (payload as Record<string, unknown>).reasoning_output_tokens;
+      if (typeof reasoningTokens === 'number' && reasoningTokens > 0) {
+        notes.thinkingTokens = reasoningTokens;
+      }
     }
   }
 
@@ -380,10 +387,11 @@ function extractSessionNotes(messages: CodexMessage[]): SessionNotes {
 /**
  * Extract context from a Codex session for cross-tool continuation
  */
-export async function extractCodexContext(session: UnifiedSession): Promise<SessionContext> {
+export async function extractCodexContext(session: UnifiedSession, config?: VerbosityConfig): Promise<SessionContext> {
+  const resolvedConfig = config ?? getPreset('standard');
   const messages = await readAllMessages(session.originalPath);
 
-  const { summaries: toolSummaries, filesModified } = extractToolData(messages);
+  const { summaries: toolSummaries, filesModified } = extractToolData(messages, resolvedConfig);
   const sessionNotes = extractSessionNotes(messages);
   const pendingTasks: string[] = [];
 
@@ -443,15 +451,15 @@ export async function extractCodexContext(session: UnifiedSession): Promise<Sess
     responseItemEntries.some((m) => m.role === 'user') || responseItemEntries.some((m) => m.role === 'assistant');
   const allMessages = hasResponseItems ? responseItemEntries : eventMsgEntries;
 
-  // Build a balanced tail: keep the last 10 messages but ensure user messages aren't lost.
+  // Build a balanced tail: keep the last N messages but ensure user messages aren't lost.
   // Codex sessions can have many consecutive assistant messages (status updates, subagent reports).
   let trimmed: ConversationMessage[];
-  const tail = allMessages.slice(-10);
+  const tail = allMessages.slice(-resolvedConfig.recentMessages);
   const hasUser = tail.some((m) => m.role === 'user');
-  if (hasUser || allMessages.length <= 10) {
+  if (hasUser || allMessages.length <= resolvedConfig.recentMessages) {
     trimmed = tail;
   } else {
-    // Include the last user message + everything after it, capped at 10
+    // Include the last user message + everything after it, capped at recentMessages
     let lastUserIdx = -1;
     for (let i = allMessages.length - 1; i >= 0; i--) {
       if (allMessages[i].role === 'user') {
@@ -460,14 +468,14 @@ export async function extractCodexContext(session: UnifiedSession): Promise<Sess
       }
     }
     if (lastUserIdx >= 0) {
-      trimmed = allMessages.slice(lastUserIdx, lastUserIdx + 10);
+      trimmed = allMessages.slice(lastUserIdx, lastUserIdx + resolvedConfig.recentMessages);
     } else {
       trimmed = tail;
     }
   }
 
   // Generate markdown for injection
-  const markdown = generateHandoffMarkdown(session, trimmed, filesModified, pendingTasks, toolSummaries, sessionNotes);
+  const markdown = generateHandoffMarkdown(session, trimmed, filesModified, pendingTasks, toolSummaries, sessionNotes, resolvedConfig);
 
   return {
     session,
