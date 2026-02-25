@@ -34,9 +34,11 @@ export function findFiles(root: string, options: FindFilesOptions): string[] {
       const entries = fs.readdirSync(dir, { withFileTypes: true });
       for (const entry of entries) {
         const fullPath = path.join(dir, entry.name);
-        if (entry.isDirectory() && recursive) {
+        const isDir = entry.isDirectory() || (entry.isSymbolicLink() && fs.statSync(fullPath).isDirectory());
+        const isFile = entry.isFile() || (entry.isSymbolicLink() && fs.statSync(fullPath).isFile());
+        if (isDir && recursive) {
           walk(fullPath, depth + 1);
-        } else if (entry.isFile() && options.match(entry, fullPath)) {
+        } else if (isFile && options.match(entry, fullPath)) {
           files.push(fullPath);
         }
       }
@@ -59,7 +61,7 @@ export function listSubdirectories(dir: string): string[] {
   try {
     return fs
       .readdirSync(dir, { withFileTypes: true })
-      .filter((e) => e.isDirectory())
+      .filter((e) => e.isDirectory() || (e.isSymbolicLink() && fs.statSync(path.join(dir, e.name)).isDirectory()))
       .map((e) => path.join(dir, e.name));
   } catch (err) {
     logger.debug('listSubdirectories: cannot read directory', dir, err);
