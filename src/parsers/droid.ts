@@ -277,7 +277,7 @@ export async function extractDroidContext(session: UnifiedSession, config?: Verb
 
   const trimmed = recentMessages.slice(-resolvedConfig.recentMessages);
 
-  const markdown = generateHandoffMarkdown(session, trimmed, filesModified, pendingTasks, toolSummaries, sessionNotes);
+  const markdown = generateHandoffMarkdown(session, trimmed, filesModified, pendingTasks, toolSummaries, sessionNotes, resolvedConfig);
 
   return {
     session: sessionNotes?.model ? { ...session, model: sessionNotes.model } : session,

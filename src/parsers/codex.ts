@@ -475,7 +475,7 @@ export async function extractCodexContext(session: UnifiedSession, config?: Verb
   }
 
   // Generate markdown for injection
-  const markdown = generateHandoffMarkdown(session, trimmed, filesModified, pendingTasks, toolSummaries, sessionNotes);
+  const markdown = generateHandoffMarkdown(session, trimmed, filesModified, pendingTasks, toolSummaries, sessionNotes, resolvedConfig);
 
   return {
     session,

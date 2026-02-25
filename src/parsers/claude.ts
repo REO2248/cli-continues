@@ -533,6 +533,7 @@ export async function extractClaudeContext(
     pendingTasks,
     toolSummaries,
     sessionNotes,
+    cfg,
   );
 
   return {

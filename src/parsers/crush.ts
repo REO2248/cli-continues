@@ -230,6 +230,7 @@ export async function extractCrushContext(
     [], // pendingTasks — not tracked in Crush's schema
     [], // toolSummaries — not tracked in Crush's schema
     sessionNotes,
+    resolvedConfig,
   );
 
   return {

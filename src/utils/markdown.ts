@@ -101,8 +101,8 @@ export function generateHandoffMarkdown(
   pendingTasks: string[],
   toolSummaries: ToolUsageSummary[] = [],
   sessionNotes?: SessionNotes,
-  mode: 'inline' | 'reference' = 'inline',
   config: VerbosityConfig = getPreset('standard'),
+  mode: 'inline' | 'reference' = 'inline',
 ): string {
   const labels = getSourceLabels();
   const sourceLabel = labels[session.source] || session.source;

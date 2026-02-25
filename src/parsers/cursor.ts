@@ -208,7 +208,7 @@ export async function extractCursorContext(session: UnifiedSession, config?: Ver
 
   const trimmed = recentMessages.slice(-resolvedConfig.recentMessages);
 
-  const markdown = generateHandoffMarkdown(session, trimmed, filesModified, pendingTasks, toolSummaries, sessionNotes);
+  const markdown = generateHandoffMarkdown(session, trimmed, filesModified, pendingTasks, toolSummaries, sessionNotes, resolvedConfig);
 
   return {
     session,

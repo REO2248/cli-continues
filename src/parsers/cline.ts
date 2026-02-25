@@ -388,6 +388,7 @@ async function extractContextShared(
     pendingTasks,
     [], // toolSummaries — not available from ui_messages.json
     sessionNotes,
+    cfg,
   );
 
   return {

@@ -277,6 +277,7 @@ export async function extractAmpContext(session: UnifiedSession, config?: Verbos
     pendingTasks,
     toolSummaries,
     sessionNotes,
+    cfg,
   );
 
   return {

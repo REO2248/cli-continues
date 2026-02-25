@@ -409,6 +409,7 @@ export async function extractGeminiContext(session: UnifiedSession, config?: Ver
     pendingTasks,
     toolSummaries,
     sessionNotes,
+    resolvedConfig,
   );
 
   return {

@@ -507,7 +507,7 @@ export async function extractOpenCodeContext(session: UnifiedSession, config?: V
 
   const trimmed = recentMessages.slice(-resolvedConfig.recentMessages);
 
-  const markdown = generateHandoffMarkdown(session, trimmed, filesModified, pendingTasks, toolSummaries);
+  const markdown = generateHandoffMarkdown(session, trimmed, filesModified, pendingTasks, toolSummaries, undefined, resolvedConfig);
 
   return {
     session,

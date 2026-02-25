@@ -209,6 +209,7 @@ export async function extractAntigravityContext(
     [],  // pendingTasks — not tracked by Antigravity
     [],  // toolSummaries — no tool calls in Antigravity
     undefined,  // sessionNotes — no tokens/reasoning
+    resolvedConfig,
   );
 
   return {

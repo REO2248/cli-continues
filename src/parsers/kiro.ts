@@ -185,6 +185,8 @@ export async function extractKiroContext(session: UnifiedSession, config?: Verbo
     filesModified,
     pendingTasks,
     [], // toolSummaries — Kiro stores no tool call data
+    undefined, // sessionNotes — not tracked by Kiro
+    cfg,
   );
 
   return {

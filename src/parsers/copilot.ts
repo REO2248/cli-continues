@@ -165,7 +165,7 @@ export async function extractCopilotContext(session: UnifiedSession, config?: Ve
   const trimmed = recentMessages.slice(-resolvedConfig.recentMessages);
 
   // Generate markdown for injection
-  const markdown = generateHandoffMarkdown(session, trimmed, filesModified, pendingTasks, toolSummaries);
+  const markdown = generateHandoffMarkdown(session, trimmed, filesModified, pendingTasks, toolSummaries, undefined, resolvedConfig);
 
   return {
     session,
