@@ -12,6 +12,41 @@ const CONTEXTS_DIR = path.join(CONTINUES_DIR, 'contexts');
 // Cache TTL in milliseconds (5 minutes)
 const INDEX_TTL = 5 * 60 * 1000;
 
+// Prefix for the env fingerprint line stored in the index file
+const ENV_FINGERPRINT_PREFIX = '#env:';
+
+/**
+ * Build a fingerprint of environment variables that affect parser storage paths.
+ * When any of these env vars change, the cached index must be rebuilt.
+ */
+function computeEnvFingerprint(): string {
+  const parts: string[] = [];
+  for (const adapter of Object.values(adapters)) {
+    if (adapter.envVar) {
+      const val = process.env[adapter.envVar] || '';
+      parts.push(`${adapter.envVar}=${val}`);
+    }
+  }
+  return parts.sort().join('|');
+}
+
+/**
+ * Read the env fingerprint stored in the first line of the index file.
+ */
+function readStoredFingerprint(): string | null {
+  try {
+    const content = fs.readFileSync(INDEX_FILE, 'utf8');
+    const firstLine = content.slice(0, content.indexOf('\n'));
+    if (firstLine.startsWith(ENV_FINGERPRINT_PREFIX)) {
+      return firstLine.slice(ENV_FINGERPRINT_PREFIX.length);
+    }
+    return null;
+  } catch (err) {
+    logger.debug('index: failed to read stored fingerprint', err);
+    return null;
+  }
+}
+
 /**
  * Ensure continues directories exist
  */
@@ -35,7 +70,16 @@ export function indexNeedsRebuild(): boolean {
   try {
     const stats = fs.statSync(INDEX_FILE);
     const age = Date.now() - stats.mtime.getTime();
-    return age > INDEX_TTL;
+    if (age > INDEX_TTL) return true;
+
+    // Rebuild if env vars affecting storage paths have changed
+    const stored = readStoredFingerprint();
+    if (stored !== computeEnvFingerprint()) {
+      logger.debug('index: env fingerprint changed, rebuilding');
+      return true;
+    }
+
+    return false;
   } catch (err) {
     logger.debug('index: cache stale check failed', err);
     return true; // File doesn't exist or can't be read
@@ -64,7 +108,7 @@ export async function buildIndex(force = false): Promise<UnifiedSession[]> {
   // Sort by updated time (newest first)
   allSessions.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
 
-  // Write to index file
+  // Write to index file — first line is the env fingerprint
   const lines = allSessions.map((s) =>
     JSON.stringify({
       ...s,
@@ -73,7 +117,8 @@ export async function buildIndex(force = false): Promise<UnifiedSession[]> {
     }),
   );
 
-  fs.writeFileSync(INDEX_FILE, lines.join('\n') + '\n');
+  const fingerprint = `${ENV_FINGERPRINT_PREFIX}${computeEnvFingerprint()}`;
+  fs.writeFileSync(INDEX_FILE, fingerprint + '\n' + lines.join('\n') + '\n');
 
   return allSessions;
 }
@@ -87,7 +132,7 @@ export function loadIndex(): UnifiedSession[] {
     const lines = content
       .trim()
       .split('\n')
-      .filter((l) => l);
+      .filter((l) => l && !l.startsWith(ENV_FINGERPRINT_PREFIX));
 
     return lines.flatMap((line) => {
       try {
