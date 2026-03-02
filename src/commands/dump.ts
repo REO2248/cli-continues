@@ -25,6 +25,7 @@ export async function dumpCommand(
   },
   context: { isTTY: boolean },
 ): Promise<void> {
+  let spinner: ReturnType<typeof ora> | null = null;
   try {
     // Validate source
     const isAll = sourceOrAll === 'all';
@@ -36,7 +37,7 @@ export async function dumpCommand(
     }
 
     // Get sessions
-    const spinner = context.isTTY ? ora('Loading sessions...').start() : null;
+    spinner = context.isTTY ? ora('Loading sessions...').start() : null;
 
     let sessions: UnifiedSession[];
     if (isAll) {
