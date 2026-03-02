@@ -15,7 +15,7 @@ import { extractTextFromBlocks } from '../utils/content.js';
 import { listSubdirectories } from '../utils/fs-helpers.js';
 import { readJsonlFile } from '../utils/jsonl.js';
 import { generateHandoffMarkdown } from '../utils/markdown.js';
-import { cleanSummary, homeDir } from '../utils/parser-helpers.js';
+import { cleanSummary, homeDir, trimMessages } from '../utils/parser-helpers.js';
 import { classifyToolName } from '../types/tool-names.js';
 import type { VerbosityConfig } from '../config/index.js';
 import { getPreset } from '../config/index.js';
@@ -420,7 +420,7 @@ export async function extractKimiContext(session: UnifiedSession, config?: Verbo
     }
   }
 
-  const trimmed = recentMessages.slice(-resolvedConfig.recentMessages);
+  const trimmed = trimMessages(recentMessages, resolvedConfig.recentMessages);
 
   const markdown = generateHandoffMarkdown(
     session,
