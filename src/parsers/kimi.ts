@@ -378,12 +378,15 @@ export async function extractKimiContext(session: UnifiedSession, config?: Verbo
   for (let i = messages.length - 1; i >= 0 && messageCount < resolvedConfig.recentMessages * 2; i--) {
     const msg = messages[i];
 
-    if (msg.role === 'user' && typeof msg.content === 'string') {
-      recentMessages.unshift({
-        role: 'user',
-        content: msg.content,
-      });
-      messageCount++;
+    if (msg.role === 'user') {
+      const content = extractTextFromBlocks(msg.content as string | Array<{ type: string; text?: string }>);
+      if (content) {
+        recentMessages.unshift({
+          role: 'user',
+          content,
+        });
+        messageCount++;
+      }
     } else if (msg.role === 'assistant') {
       const content = extractTextFromBlocks(msg.content as string | Array<{ type: string; text?: string }>);
       if (content) {
@@ -417,7 +420,7 @@ export async function extractKimiContext(session: UnifiedSession, config?: Verbo
     }
   }
 
-  const trimmed = recentMessages;
+  const trimmed = recentMessages.slice(-resolvedConfig.recentMessages);
 
   const markdown = generateHandoffMarkdown(
     session,
