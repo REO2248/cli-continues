@@ -55,7 +55,9 @@ process.on('SIGINT', () => {
     } else {
       console.log('\nCancelled.');
     }
-    process.exitCode = 1;
+    if (process.exitCode == null) {
+      process.exitCode = 130;
+    }
   }
 });
 
