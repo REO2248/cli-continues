@@ -25,6 +25,99 @@ export function resolveCrossToolForwarding(
   return resolveTargetForwarding(target, adapter?.mapHandoffFlags, options);
 }
 
+function hasOption(args: string[], ...flags: string[]): boolean {
+  return args.some((token) => flags.some((flag) => token === flag || token.startsWith(`${flag}=`)));
+}
+
+function hasConfigOverride(args: string[], key: string): boolean {
+  const keyPrefix = `${key}=`;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+
+    if ((token === '-c' || token === '--config') && index + 1 < args.length) {
+      const value = args[index + 1]?.trim();
+      if (value?.startsWith(keyPrefix)) return true;
+      index += 1;
+      continue;
+    }
+
+    if (token.startsWith('-c=')) {
+      if (token.slice(3).trim().startsWith(keyPrefix)) return true;
+    }
+
+    if (token.startsWith('--config=')) {
+      if (token.slice('--config='.length).trim().startsWith(keyPrefix)) return true;
+    }
+  }
+
+  return false;
+}
+
+export function getDefaultHandoffInitArgs(target: SessionSource, forwardedArgs: string[] = []): string[] {
+  switch (target) {
+    case 'claude': {
+      return hasOption(forwardedArgs, '--dangerously-skip-permissions') ? [] : ['--dangerously-skip-permissions'];
+    }
+    case 'codex': {
+      const defaults: string[] = [];
+
+      if (!hasConfigOverride(forwardedArgs, 'model_reasoning_effort')) {
+        defaults.push('-c', 'model_reasoning_effort="high"');
+      }
+
+      const hasUnsafeAuto = hasOption(forwardedArgs, '--dangerously-bypass-approvals-and-sandbox', '--full-auto');
+
+      if (!hasUnsafeAuto && !hasOption(forwardedArgs, '--ask-for-approval', '-a')) {
+        defaults.push('--ask-for-approval', 'never');
+      }
+
+      if (!hasUnsafeAuto && !hasOption(forwardedArgs, '--sandbox', '-s')) {
+        defaults.push('--sandbox', 'danger-full-access');
+      }
+
+      if (!hasConfigOverride(forwardedArgs, 'model_reasoning_summary')) {
+        defaults.push('-c', 'model_reasoning_summary="detailed"');
+      }
+
+      if (!hasConfigOverride(forwardedArgs, 'model_supports_reasoning_summaries')) {
+        defaults.push('-c', 'model_supports_reasoning_summaries=true');
+      }
+
+      return defaults;
+    }
+    case 'copilot': {
+      return hasOption(forwardedArgs, '--allow-all', '--yolo') ? [] : ['--allow-all'];
+    }
+    case 'gemini': {
+      return hasOption(forwardedArgs, '--yolo', '-y', '--approval-mode') ? [] : ['--yolo'];
+    }
+    case 'cursor': {
+      return hasOption(forwardedArgs, '--yolo', '--force', '-f') ? [] : ['--yolo'];
+    }
+    case 'droid': {
+      return hasOption(forwardedArgs, '--skip-permissions-unsafe', '--auto') ? [] : ['--skip-permissions-unsafe'];
+    }
+    case 'kimi': {
+      return hasOption(forwardedArgs, '--yolo', '-y', '--yes') ? [] : ['--yolo'];
+    }
+    case 'amp': {
+      return hasOption(forwardedArgs, '--dangerously-allow-all') ? [] : ['--dangerously-allow-all'];
+    }
+    case 'kiro': {
+      return hasOption(forwardedArgs, '--trust-all-tools') ? [] : ['--trust-all-tools'];
+    }
+    case 'crush': {
+      return hasOption(forwardedArgs, '--yolo', '-y') ? [] : ['--yolo'];
+    }
+    case 'qwen-code': {
+      return hasOption(forwardedArgs, '--yolo', '-y', '--approval-mode') ? [] : ['--yolo'];
+    }
+    default:
+      return [];
+  }
+}
+
 /**
  * Resume a session using native CLI commands
  */
@@ -78,7 +171,12 @@ export async function crossToolResume(
   if (!adapter) throw new Error(`Unknown target: ${target}`);
 
   const resolved = resolveCrossToolForwarding(target, forwarding);
-  await runCommand(adapter.binaryName, [...resolved.extraArgs, ...adapter.crossToolArgs(prompt, cwd)], cwd);
+  const defaultInitArgs = getDefaultHandoffInitArgs(target, resolved.extraArgs);
+  await runCommand(
+    adapter.binaryName,
+    [...defaultInitArgs, ...resolved.extraArgs, ...adapter.crossToolArgs(prompt, cwd)],
+    cwd,
+  );
 }
 
 /**
@@ -161,9 +259,7 @@ export async function resume(
  */
 function runCommand(command: string, args: string[], cwd: string, stdinData?: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const stdio: import('node:child_process').StdioOptions = stdinData
-      ? ['pipe', 'inherit', 'inherit']
-      : 'inherit';
+    const stdio: import('node:child_process').StdioOptions = stdinData ? ['pipe', 'inherit', 'inherit'] : 'inherit';
 
     // On Windows, invoke cmd.exe explicitly to handle .cmd/.bat shims.
     // Args stay in the array — no shell:true (avoids DEP0190), no string
@@ -235,6 +331,8 @@ export function getResumeCommand(
   }
 
   const resolved = resolveCrossToolForwarding(actualTarget, forwarding);
-  const suffix = resolved.extraArgs.length > 0 ? ` ${formatForwardArgs(resolved.extraArgs)}` : '';
+  const defaultInitArgs = getDefaultHandoffInitArgs(actualTarget, resolved.extraArgs);
+  const suffixArgs = [...defaultInitArgs, ...resolved.extraArgs];
+  const suffix = suffixArgs.length > 0 ? ` ${formatForwardArgs(suffixArgs)}` : '';
   return `continues resume ${session.id} --in ${actualTarget}${suffix}`;
 }
