@@ -763,7 +763,7 @@ register({
   extractContext: extractCursorContext,
   nativeResumeArgs: (s) => ['--resume', s.id],
   crossToolArgs: (prompt) => [prompt],
-  resumeCommandDisplay: (s) => `cursor-agent --resume ${s.id}`,
+  resumeCommandDisplay: (s) => `cursor-agent --resume ${s.id} (or: agent --resume ${s.id})`,
   mapHandoffFlags: mapCursorAgentFlags,
 });
 
