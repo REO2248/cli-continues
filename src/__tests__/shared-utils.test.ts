@@ -18,7 +18,7 @@ import {
 } from '../utils/content.js';
 import { countDiffStats, extractStdoutTail, formatEditDiff, formatNewFileDiff } from '../utils/diff.js';
 import { findFiles, listSubdirectories } from '../utils/fs-helpers.js';
-import { getFileStats, readJsonlFile, scanJsonlHead } from '../utils/jsonl.js';
+import { getFileStats, readJsonlFile, scanJsonlFile, scanJsonlHead } from '../utils/jsonl.js';
 import { extractRepo, trimMessages } from '../utils/parser-helpers.js';
 import {
   type AnthropicMessage,
@@ -154,6 +154,40 @@ describe('scanJsonlHead', () => {
     );
 
     expect(visited).toEqual([0]);
+  });
+});
+
+describe('scanJsonlFile', () => {
+  it('streams every valid JSONL line', async () => {
+    const dir = makeTmpDir();
+    const file = path.join(dir, 'test.jsonl');
+    const lines = Array.from({ length: 120 }, (_, i) => JSON.stringify({ i }));
+    fs.writeFileSync(file, `${lines.join('\n')}\n`);
+
+    const visited: number[] = [];
+    await scanJsonlFile(file, (parsed) => {
+      visited.push((parsed as { i: number }).i);
+      return 'continue';
+    });
+
+    expect(visited.at(0)).toBe(0);
+    expect(visited.at(-1)).toBe(119);
+    expect(visited).toHaveLength(120);
+  });
+
+  it('supports early stop via visitor', async () => {
+    const dir = makeTmpDir();
+    const file = path.join(dir, 'test.jsonl');
+    fs.writeFileSync(file, '{"type":"a"}\n{"type":"b"}\n{"type":"c"}\n');
+
+    const visited: string[] = [];
+    await scanJsonlFile(file, (parsed) => {
+      const p = parsed as { type: string };
+      visited.push(p.type);
+      return p.type === 'b' ? 'stop' : 'continue';
+    });
+
+    expect(visited).toEqual(['a', 'b']);
   });
 });
 
@@ -421,6 +455,72 @@ describe('extractAnthropicToolData', () => {
     expect(filesModified).toContain('/tmp/edited-by-morph.ts');
   });
 
+  it('tracks files modified by morph___edit_file', () => {
+    const messages: AnthropicMessage[] = [
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'tu1',
+            name: 'morph___edit_file',
+            input: { path: '/tmp/edited-by-morph-alias.ts', instruction: 'edit file', code_edit: '...' },
+          },
+        ],
+      },
+    ];
+
+    const { filesModified, summaries } = extractAnthropicToolData(messages);
+    expect(filesModified).toContain('/tmp/edited-by-morph-alias.ts');
+    expect(summaries[0].samples[0].data).toMatchObject({
+      category: 'edit',
+      filePath: '/tmp/edited-by-morph-alias.ts',
+    });
+  });
+
+  it('builds edit diff data from Droid old_str/new_str inputs', () => {
+    const messages: AnthropicMessage[] = [
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'tu1',
+            name: 'Edit',
+            input: { path: '/tmp/droid-edit.ts', old_str: 'old value', new_str: 'new value' },
+          },
+        ],
+      },
+    ];
+
+    const { filesModified, summaries } = extractAnthropicToolData(messages);
+    expect(filesModified).toContain('/tmp/droid-edit.ts');
+    expect(summaries[0].samples[0].data).toMatchObject({
+      category: 'edit',
+      filePath: '/tmp/droid-edit.ts',
+      diffStats: { added: 1, removed: 1 },
+    });
+  });
+
+  it('tracks ApplyPatch file paths from patch input text', () => {
+    const patch = ['*** Begin Patch', '*** Update File: src/example.ts', '@@', '-old', '+new', '*** End Patch'].join(
+      '\n',
+    );
+    const messages: AnthropicMessage[] = [
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'tu1', name: 'ApplyPatch', input: { input: patch } }],
+      },
+    ];
+
+    const { filesModified, summaries } = extractAnthropicToolData(messages);
+    expect(filesModified).toContain('src/example.ts');
+    expect(summaries[0].samples[0].data).toMatchObject({
+      category: 'edit',
+      filePath: 'src/example.ts',
+    });
+  });
+
   it('handles empty messages', () => {
     const { summaries, filesModified } = extractAnthropicToolData([]);
     expect(summaries).toEqual([]);
@@ -549,6 +649,7 @@ describe('classifyToolName', () => {
     expect(classifyToolName('Write')).toBe('write');
     expect(classifyToolName('Edit')).toBe('edit');
     expect(classifyToolName('apply_diff')).toBe('edit');
+    expect(classifyToolName('create')).toBe('write');
     expect(classifyToolName('create_file')).toBe('write');
   });
 

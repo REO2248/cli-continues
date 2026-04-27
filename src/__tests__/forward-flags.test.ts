@@ -264,4 +264,47 @@ describe('cross-tool forwarding', () => {
     expect(command).not.toContain('--yolo');
     expect(command).not.toContain('--approval-mode yolo');
   });
+
+  it('uses current native resume commands for codex and droid', () => {
+    const codexSession: UnifiedSession = {
+      id: 'codex-session-id',
+      source: 'codex',
+      cwd: '/tmp/project',
+      lines: 10,
+      bytes: 120,
+      createdAt: new Date('2026-02-20T00:00:00.000Z'),
+      updatedAt: new Date('2026-02-20T00:00:00.000Z'),
+      originalPath: '/tmp/codex.jsonl',
+    };
+    const droidSession: UnifiedSession = {
+      ...codexSession,
+      id: 'droid-session-id',
+      source: 'droid',
+      originalPath: '/tmp/droid.jsonl',
+    };
+
+    expect(adapters.codex.nativeResumeArgs(codexSession)).toEqual(['resume', 'codex-session-id']);
+    expect(adapters.codex.resumeCommandDisplay(codexSession)).toBe('codex resume codex-session-id');
+    expect(getResumeCommand(codexSession)).toBe('codex resume codex-session-id');
+
+    expect(adapters.droid.nativeResumeArgs(droidSession)).toEqual(['--resume', 'droid-session-id']);
+    expect(adapters.droid.resumeCommandDisplay(droidSession)).toBe('droid --resume droid-session-id');
+    expect(getResumeCommand(droidSession)).toBe('droid --resume droid-session-id');
+  });
+
+  it('rejects invalid runtime targets before formatting forwarding commands', () => {
+    const session: UnifiedSession = {
+      id: 'abc123456789',
+      source: 'claude',
+      cwd: '/tmp/project',
+      lines: 10,
+      bytes: 120,
+      createdAt: new Date('2026-02-20T00:00:00.000Z'),
+      updatedAt: new Date('2026-02-20T00:00:00.000Z'),
+      originalPath: '/tmp/session.jsonl',
+    };
+
+    expect(() => resolveCrossToolForwarding('not-a-tool' as never)).toThrow('Unknown target: not-a-tool');
+    expect(() => getResumeCommand(session, 'not-a-tool' as never)).toThrow('Unknown target: not-a-tool');
+  });
 });

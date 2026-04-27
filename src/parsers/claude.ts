@@ -1,13 +1,23 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import type { VerbosityConfig } from '../config/index.js';
+import { getPreset } from '../config/index.js';
 import { logger } from '../logger.js';
-import type { ConversationMessage, ReasoningStep, SessionContext, SessionNotes, SubagentResult, UnifiedSession } from '../types/index.js';
+import type {
+  ConversationMessage,
+  ReasoningStep,
+  SessionContext,
+  SessionNotes,
+  SessionParseOptions,
+  UnifiedSession,
+} from '../types/index.js';
 import type { ClaudeMessage } from '../types/schemas.js';
 import { extractTextFromBlocks, isRealUserMessage } from '../utils/content.js';
-import { findFiles } from '../utils/fs-helpers.js';
-import { getFileStats, readJsonlFile, scanJsonlHead } from '../utils/jsonl.js';
+import { findFiles, mapConcurrent } from '../utils/fs-helpers.js';
+import { getFileStats, readJsonlFile, scanJsonlFile, scanJsonlHead } from '../utils/jsonl.js';
 import { generateHandoffMarkdown, safePath } from '../utils/markdown.js';
-import { cleanSummary, extractRepoFromCwd, homeDir } from '../utils/parser-helpers.js';
+import { cleanSummary, extractRepoFromCwd, homeDir, trimMessages } from '../utils/parser-helpers.js';
+import { matchesCwd } from '../utils/slug.js';
 import {
   type AnthropicMessage,
   extractAnthropicToolData,
@@ -15,8 +25,6 @@ import {
   isThinkingTool,
 } from '../utils/tool-extraction.js';
 import { truncate } from '../utils/tool-summarizer.js';
-import type { VerbosityConfig } from '../config/index.js';
-import { getPreset } from '../config/index.js';
 
 const CLAUDE_PROJECTS_DIR = process.env.CLAUDE_CONFIG_DIR
   ? path.join(process.env.CLAUDE_CONFIG_DIR, 'projects')
@@ -25,34 +33,51 @@ const CLAUDE_PROJECTS_DIR = process.env.CLAUDE_CONFIG_DIR
 /**
  * Find all Claude session files recursively
  */
-async function findSessionFiles(): Promise<string[]> {
-  return findFiles(CLAUDE_PROJECTS_DIR, {
-    match: (entry) =>
-      entry.name.endsWith('.jsonl') &&
-      !entry.name.includes('debug') &&
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/i.test(entry.name),
-  });
+async function findSessionFiles(options: SessionParseOptions = {}): Promise<string[]> {
+  const roots = options.cwd
+    ? [path.join(CLAUDE_PROJECTS_DIR, options.cwd.replace(/[/.]/g, '-'))]
+    : [CLAUDE_PROJECTS_DIR];
+
+  return roots.flatMap((root) =>
+    findFiles(root, {
+      match: (entry) =>
+        entry.name.endsWith('.jsonl') &&
+        !entry.name.includes('debug') &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/i.test(entry.name),
+    }),
+  );
 }
 
 /**
  * Parse session metadata and first user message
  */
-async function parseSessionInfo(filePath: string): Promise<{
+async function parseSessionInfo(
+  filePath: string,
+  options: SessionParseOptions = {},
+): Promise<{
   sessionId: string;
   cwd: string;
   gitBranch?: string;
   firstUserMessage: string;
+  firstTimestamp?: string;
+  lastTimestamp?: string;
 }> {
   let sessionId = '';
   let cwd = '';
   let gitBranch = '';
   let firstUserMessage = '';
+  let firstTimestamp = '';
+  let lastTimestamp = '';
 
-  await scanJsonlHead(filePath, 50, (parsed) => {
+  const visitor = (parsed: unknown): 'continue' | 'stop' => {
     const msg = parsed as ClaudeMessage;
     if (msg.sessionId && !sessionId) sessionId = msg.sessionId;
     if (msg.cwd && !cwd) cwd = msg.cwd;
     if (msg.gitBranch && !gitBranch) gitBranch = msg.gitBranch;
+    if (msg.timestamp) {
+      if (!firstTimestamp) firstTimestamp = msg.timestamp;
+      lastTimestamp = msg.timestamp;
+    }
 
     if (!firstUserMessage && msg.type === 'user' && msg.message?.content) {
       const content = extractTextFromBlocks(msg.message.content);
@@ -60,33 +85,40 @@ async function parseSessionInfo(filePath: string): Promise<{
         firstUserMessage = content;
       }
     }
+    if (options.lightweight && sessionId && cwd && firstUserMessage) return 'stop';
     return 'continue';
-  });
+  };
+
+  if (options.lightweight) {
+    await scanJsonlHead(filePath, 50, visitor);
+  } else {
+    await scanJsonlFile(filePath, visitor);
+  }
 
   if (!sessionId) {
     sessionId = path.basename(filePath, '.jsonl');
   }
 
-  return { sessionId, cwd, gitBranch, firstUserMessage };
+  return { sessionId, cwd, gitBranch, firstUserMessage, firstTimestamp, lastTimestamp };
 }
 
 /**
  * Parse all Claude sessions
  */
-export async function parseClaudeSessions(): Promise<UnifiedSession[]> {
-  const files = await findSessionFiles();
-  const sessions: UnifiedSession[] = [];
-
-  for (const filePath of files) {
+export async function parseClaudeSessions(options: SessionParseOptions = {}): Promise<UnifiedSession[]> {
+  const files = await findSessionFiles(options);
+  const parsedSessions = await mapConcurrent(files, 16, async (filePath): Promise<UnifiedSession | null> => {
     try {
-      const info = await parseSessionInfo(filePath);
-      const stats = await getFileStats(filePath);
+      const info = await parseSessionInfo(filePath, options);
+      if (options.cwd && info.cwd && !matchesCwd(info.cwd, options.cwd)) return null;
+
       const fileStats = fs.statSync(filePath);
+      const stats = options.lightweight ? { lines: 0, bytes: fileStats.size } : await getFileStats(filePath);
 
       const summary = cleanSummary(info.firstUserMessage);
       const repo = extractRepoFromCwd(info.cwd);
 
-      sessions.push({
+      return {
         id: info.sessionId,
         source: 'claude',
         cwd: info.cwd,
@@ -94,18 +126,21 @@ export async function parseClaudeSessions(): Promise<UnifiedSession[]> {
         branch: info.gitBranch,
         lines: stats.lines,
         bytes: stats.bytes,
-        createdAt: fileStats.birthtime,
-        updatedAt: fileStats.mtime,
+        createdAt: !options.lightweight && info.firstTimestamp ? new Date(info.firstTimestamp) : fileStats.birthtime,
+        updatedAt: !options.lightweight && info.lastTimestamp ? new Date(info.lastTimestamp) : fileStats.mtime,
         originalPath: filePath,
         summary: summary || undefined,
-      });
+      };
     } catch (err) {
       logger.debug('claude: skipping unparseable session', filePath, err);
       // Skip files we can't parse
+      return null;
     }
-  }
+  });
 
-  return sessions.filter((s) => s.bytes > 200).sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+  const sessions = parsedSessions.filter((session): session is UnifiedSession => session !== null);
+  const sorted = sessions.filter((s) => s.bytes > 200).sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+  return options.limit ? sorted.slice(0, options.limit) : sorted;
 }
 
 /**
@@ -138,6 +173,14 @@ interface TaskStatusEntry {
   source: 'queue' | 'user_notification' | 'task_output';
 }
 
+interface AgentToolResultEntry {
+  agentId: string;
+  description: string;
+  status?: string;
+  outputFile?: string;
+  result?: string;
+}
+
 function extractTagValue(text: string, tags: string[]): string | undefined {
   for (const tag of tags) {
     const m = text.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, 'i'));
@@ -146,10 +189,7 @@ function extractTagValue(text: string, tags: string[]): string | undefined {
   return undefined;
 }
 
-function extractTaskStatusesFromTaggedText(
-  text: string,
-  source: TaskStatusEntry['source'],
-): TaskStatusEntry[] {
+function extractTaskStatusesFromTaggedText(text: string, source: TaskStatusEntry['source']): TaskStatusEntry[] {
   const statuses: TaskStatusEntry[] = [];
   const notificationBlocks = text.match(/<task-notification>[\s\S]*?<\/task-notification>/gi);
 
@@ -194,7 +234,20 @@ function extractToolResultText(content: unknown): string {
 function isTerminalTaskStatus(status?: string): boolean {
   if (!status) return false;
   const normalized = status.toLowerCase().trim();
-  return new Set(['completed', 'complete', 'success', 'succeeded', 'done', 'failed', 'error', 'killed', 'cancelled', 'canceled', 'timeout', 'timed_out']).has(normalized);
+  return new Set([
+    'completed',
+    'complete',
+    'success',
+    'succeeded',
+    'done',
+    'failed',
+    'error',
+    'killed',
+    'cancelled',
+    'canceled',
+    'timeout',
+    'timed_out',
+  ]).has(normalized);
 }
 
 function isCompletedTaskStatus(status?: string): boolean {
@@ -254,6 +307,98 @@ function extractTaskOutputStatuses(messages: ClaudeMessage[]): TaskStatusEntry[]
   }
 
   return statuses;
+}
+
+function extractTextFromUnknownContent(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((item) => {
+      if (!item || typeof item !== 'object') return '';
+      const text = (item as Record<string, unknown>).text;
+      return typeof text === 'string' ? text : '';
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+function extractAgentToolResults(messages: ClaudeMessage[]): AgentToolResultEntry[] {
+  const entries: AgentToolResultEntry[] = [];
+  const agentCalls = new Map<string, { description: string }>();
+
+  for (const msg of messages) {
+    const content = msg.message?.content;
+    if (Array.isArray(content)) {
+      for (const block of content as Array<Record<string, unknown>>) {
+        if (block.type !== 'tool_use' || block.name !== 'Agent') continue;
+        const id = typeof block.id === 'string' ? block.id : '';
+        const input = block.input && typeof block.input === 'object' ? (block.input as Record<string, unknown>) : {};
+        const description = typeof input.description === 'string' ? input.description : '';
+        if (id) agentCalls.set(id, { description });
+      }
+    }
+
+    const raw = msg as Record<string, unknown>;
+    const toolUseResult = raw.toolUseResult;
+    if (!toolUseResult || typeof toolUseResult !== 'object' || Array.isArray(toolUseResult)) continue;
+    const resultRecord = toolUseResult as Record<string, unknown>;
+    const agentId = typeof resultRecord.agentId === 'string' ? resultRecord.agentId : '';
+    if (!agentId) continue;
+
+    let description = typeof resultRecord.description === 'string' ? resultRecord.description : '';
+    if (!description && typeof resultRecord.prompt === 'string') description = resultRecord.prompt.split('\n')[0] || '';
+    if (!description && Array.isArray(content)) {
+      const toolUseId = content
+        .filter((block) => block.type === 'tool_result')
+        .map((block) => (block as Record<string, unknown>).tool_use_id)
+        .find((value): value is string => typeof value === 'string');
+      description = toolUseId ? agentCalls.get(toolUseId)?.description || '' : '';
+    }
+
+    const outputFile = typeof resultRecord.outputFile === 'string' ? resultRecord.outputFile : undefined;
+    const result = extractTextFromUnknownContent(resultRecord.content);
+    const status = typeof resultRecord.status === 'string' ? resultRecord.status : undefined;
+    entries.push({ agentId, description, status, outputFile, result });
+  }
+
+  return entries;
+}
+
+function normalizeSubagentStatus(
+  status: string | undefined,
+  fallback: 'completed' | 'killed',
+): 'completed' | 'killed' | 'error' {
+  if (!status) return fallback;
+  const normalized = status.toLowerCase();
+  if (isCompletedTaskStatus(normalized)) return 'completed';
+  if (['error', 'failed', 'failure'].includes(normalized)) return 'error';
+  if (['killed', 'cancelled', 'canceled', 'timeout', 'timed_out'].includes(normalized)) return 'killed';
+  return fallback;
+}
+
+function resolveSubagentPath(sessionDir: string, taskId: string, outputFile?: string): string {
+  const candidates: string[] = [];
+  if (outputFile) {
+    candidates.push(path.isAbsolute(outputFile) ? outputFile : path.join(sessionDir, outputFile));
+  }
+  candidates.push(path.join(sessionDir, 'subagents', `agent-${taskId}.jsonl`));
+  candidates.push(path.join(sessionDir, 'subagents', `${taskId}.jsonl`));
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  const subagentsDir = path.join(sessionDir, 'subagents');
+  try {
+    if (fs.existsSync(subagentsDir)) {
+      const match = fs.readdirSync(subagentsDir).find((entry) => entry.endsWith('.jsonl') && entry.includes(taskId));
+      if (match) return path.join(subagentsDir, match);
+    }
+  } catch (err) {
+    logger.debug('claude: failed to scan subagents dir', subagentsDir, err);
+  }
+
+  return candidates[0] || path.join(subagentsDir, `agent-${taskId}.jsonl`);
 }
 
 /**
@@ -320,10 +465,12 @@ function parseQueueOperations(messages: ClaudeMessage[]): QueueOperationEntry[] 
  */
 function isTerminationMessage(text: string): boolean {
   const lower = text.toLowerCase();
-  return lower.includes('out of extra usage') ||
-         lower.includes('rate limit') ||
-         lower.includes('resets ') ||
-         (text.length < 50 && (lower.includes('usage') || lower.includes('limit')));
+  return (
+    lower.includes('out of extra usage') ||
+    lower.includes('rate limit') ||
+    lower.includes('resets ') ||
+    (text.length < 50 && (lower.includes('usage') || lower.includes('limit')))
+  );
 }
 
 /**
@@ -331,7 +478,9 @@ function isTerminationMessage(text: string): boolean {
  * Skips short termination/rate-limit messages to find the real output.
  * Returns null text if the file doesn't exist, is empty, or has no substantial result.
  */
-async function extractSubagentResult(filePath: string): Promise<{ text: string | null; status: 'completed' | 'killed'; toolCallCount: number }> {
+async function extractSubagentResult(
+  filePath: string,
+): Promise<{ text: string | null; status: 'completed' | 'killed'; toolCallCount: number }> {
   try {
     if (!fs.existsSync(filePath)) {
       return { text: null, status: 'killed', toolCallCount: 0 };
@@ -411,40 +560,11 @@ function extractPendingFromThinking(messages: ClaudeMessage[], maxTasks: number)
   return tasks;
 }
 
-/**
- * Read supplementary tool result files from {session_dir}/tool-results/.
- * Returns an array of note strings describing each file found.
- */
-function readToolResultsDir(sessionDir: string): string[] {
-  const toolResultsPath = path.join(sessionDir, 'tool-results');
-  const notes: string[] = [];
-
-  try {
-    if (!fs.existsSync(toolResultsPath)) return notes;
-    const entries = fs.readdirSync(toolResultsPath, { withFileTypes: true });
-
-    for (const entry of entries) {
-      if (!entry.isFile()) continue;
-      const filePath = path.join(toolResultsPath, entry.name);
-      try {
-        const stats = fs.statSync(filePath);
-        const sizeKb = (stats.size / 1024).toFixed(1);
-        notes.push(`tool-result: ${entry.name} (${sizeKb} KB)`);
-      } catch {
-        notes.push(`tool-result: ${entry.name} (unreadable)`);
-      }
-    }
-  } catch (err) {
-    logger.debug('claude: failed to read tool-results dir', toolResultsPath, err);
-  }
-
-  return notes;
-}
-
 function hasCompactionCue(messages: ClaudeMessage[]): boolean {
   if (messages.some((m) => m.isCompactSummary)) return true;
 
-  const continuationPattern = /(continued from a previous conversation|ran out of context|summary below covers|conversation compacted)/i;
+  const continuationPattern =
+    /(continued from a previous conversation|ran out of context|summary below covers|conversation compacted)/i;
   for (const msg of messages) {
     if (msg.type !== 'user' && msg.type !== 'assistant') continue;
     const text = extractTextFromBlocks(msg.message?.content);
@@ -596,14 +716,9 @@ function extractSessionNotes(messages: ClaudeMessage[], config?: VerbosityConfig
 /**
  * Extract context from a Claude session for cross-tool continuation
  */
-export async function extractClaudeContext(
-  session: UnifiedSession,
-  config?: VerbosityConfig,
-): Promise<SessionContext> {
+export async function extractClaudeContext(session: UnifiedSession, config?: VerbosityConfig): Promise<SessionContext> {
   const cfg = config ?? getPreset('standard');
   const messages = await readJsonlFile<ClaudeMessage>(session.originalPath);
-  const recentMessages: ConversationMessage[] = [];
-
   // Extract tool data via shared utility
   const anthropicMsgs: AnthropicMessage[] = messages
     .filter((m) => m.message?.content && Array.isArray(m.message.content))
@@ -663,27 +778,18 @@ export async function extractClaudeContext(
     return true;
   });
 
-  for (const msg of conversational.slice(-(cfg.recentMessages * 2))) {
-    if (msg.type === 'user') {
-      const content = extractTextFromBlocks(msg.message?.content);
-      if (content) {
-        recentMessages.push({
-          role: 'user',
-          content: truncate(content, cfg.maxMessageChars),
-          timestamp: new Date(msg.timestamp),
-        });
-      }
-    } else if (msg.type === 'assistant') {
-      const content = extractTextFromBlocks(msg.message?.content);
-      if (content) {
-        recentMessages.push({
-          role: 'assistant',
-          content: truncate(content, cfg.maxMessageChars),
-          timestamp: new Date(msg.timestamp),
-        });
-      }
-    }
-  }
+  const recentMessages: ConversationMessage[] = conversational.flatMap((msg) => {
+    const content = extractTextFromBlocks(msg.message?.content).trim();
+    if (!content) return [];
+    const role: ConversationMessage['role'] = msg.type === 'user' ? 'user' : 'assistant';
+    return [
+      {
+        role,
+        content: truncate(content, cfg.maxMessageChars),
+        timestamp: new Date(msg.timestamp),
+      },
+    ];
+  });
 
   // ── Gap 2: Parse subagent JSONL files ─────────────────────────────────
   if (cfg.agents.claude.parseSubagents) {
@@ -692,6 +798,7 @@ export async function extractClaudeContext(
     const queueOps = parseQueueOperations(messages);
     const userTaskStatuses = extractUserTaskNotifications(messages);
     const taskOutputStatuses = extractTaskOutputStatuses(messages);
+    const agentToolResults = extractAgentToolResults(messages);
 
     // Terminal states can come from queue ops, user task notifications, or TaskOutput payloads.
     const terminalTaskIds = new Set<string>();
@@ -718,16 +825,16 @@ export async function extractClaudeContext(
     });
 
     let subagentCount = 0;
+    const processedSubagents = new Set<string>();
     for (const task of uniqueTasks) {
       if (subagentCount >= cfg.task.maxSamples) break;
       // Only local_agent tasks are backed by subagent transcript files.
       if (task.taskType && task.taskType !== 'local_agent') continue;
+      processedSubagents.add(task.taskId);
 
-      const subagentPath = path.join(sessionDir, 'subagents', `agent-${task.taskId}.jsonl`);
+      const subagentPath = resolveSubagentPath(sessionDir, task.taskId);
       const { text, status: extractedStatus, toolCallCount } = await extractSubagentResult(subagentPath);
-      const status = !text && completedTaskIds.has(task.taskId)
-        ? 'completed'
-        : extractedStatus;
+      const status = !text && completedTaskIds.has(task.taskId) ? 'completed' : extractedStatus;
 
       // Always populate structured subagentResults
       if (!sessionNotes.subagentResults) sessionNotes.subagentResults = [];
@@ -748,6 +855,37 @@ export async function extractClaudeContext(
         // Incomplete/killed subagent — add to pending tasks
         if (cfg.pendingTasks.extractFromSubagents && pendingTasks.length < cfg.pendingTasks.maxTasks) {
           pendingTasks.push(`Incomplete subagent: ${task.description}`);
+        }
+      }
+    }
+
+    for (const agent of agentToolResults) {
+      if (subagentCount >= cfg.task.maxSamples) break;
+      if (processedSubagents.has(agent.agentId)) continue;
+      processedSubagents.add(agent.agentId);
+
+      const subagentPath = resolveSubagentPath(sessionDir, agent.agentId, agent.outputFile);
+      const { text, status: extractedStatus, toolCallCount } = await extractSubagentResult(subagentPath);
+      const resultText = text || agent.result || undefined;
+      const status = normalizeSubagentStatus(agent.status, resultText ? 'completed' : extractedStatus);
+      const description = agent.description || `Agent ${agent.agentId}`;
+
+      if (!sessionNotes.subagentResults) sessionNotes.subagentResults = [];
+      sessionNotes.subagentResults.push({
+        taskId: agent.agentId,
+        description,
+        status,
+        result: resultText ? truncate(resultText, cfg.task.subagentResultChars) : undefined,
+        toolCallCount,
+      });
+
+      if (resultText) {
+        if (!sessionNotes.reasoning) sessionNotes.reasoning = [];
+        sessionNotes.reasoning.push(`Subagent "${description}": ${truncate(resultText, cfg.task.subagentResultChars)}`);
+        subagentCount++;
+      } else if (!isTerminalTaskStatus(agent.status)) {
+        if (cfg.pendingTasks.extractFromSubagents && pendingTasks.length < cfg.pendingTasks.maxTasks) {
+          pendingTasks.push(`Incomplete subagent: ${description}`);
         }
       }
     }
@@ -784,7 +922,7 @@ export async function extractClaudeContext(
     }
   }
 
-  const finalMessages = recentMessages.slice(-cfg.recentMessages);
+  const finalMessages = trimMessages(recentMessages, cfg.recentMessages);
   const dedupedPendingTasks = Array.from(new Set(pendingTasks)).slice(0, cfg.pendingTasks.maxTasks);
 
   const baseMarkdown = generateHandoffMarkdown(

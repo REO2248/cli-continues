@@ -16,7 +16,7 @@ import { classifyToolName } from '../types/tool-names.js';
 import { listSubdirectories } from '../utils/fs-helpers.js';
 import { getFileStats, readJsonlFile, scanJsonlHead } from '../utils/jsonl.js';
 import { generateHandoffMarkdown } from '../utils/markdown.js';
-import { homeDir } from '../utils/parser-helpers.js';
+import { homeDir, trimMessages } from '../utils/parser-helpers.js';
 import {
   extractExitCode,
   fetchSummary,
@@ -149,8 +149,8 @@ export async function extractCopilotContext(
   const recentMessages: ConversationMessage[] = [];
   const pendingTasks: string[] = [];
 
-  // Process events to extract conversation
-  for (const event of events.slice(-resolvedConfig.recentMessages * 2)) {
+  // Process all events before trimming; Copilot tails often contain only tool execution events.
+  for (const event of events) {
     if (event.type === 'user.message') {
       const content = event.data?.content || event.data?.transformedContent || '';
       if (content) {
@@ -202,7 +202,7 @@ export async function extractCopilotContext(
   // Extract tool summaries and file modifications from toolRequests across all events
   const { summaries: toolSummaries, filesModified } = extractCopilotToolSummaries(events, resolvedConfig);
 
-  const trimmed = recentMessages.slice(-resolvedConfig.recentMessages);
+  const trimmed = trimMessages(recentMessages, resolvedConfig.recentMessages);
 
   // Generate markdown for injection
   const markdown = generateHandoffMarkdown(

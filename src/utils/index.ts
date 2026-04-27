@@ -1,11 +1,12 @@
 import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
+import type { VerbosityConfig } from '../config/index.js';
 import { logger } from '../logger.js';
 import { adapters } from '../parsers/registry.js';
-import type { VerbosityConfig } from '../config/index.js';
-import type { SessionContext, SessionSource, UnifiedSession } from '../types/index.js';
+import type { SessionContext, SessionParseOptions, SessionSource, UnifiedSession } from '../types/index.js';
 import { homeDir } from './parser-helpers.js';
+import { matchesCwd } from './slug.js';
 
 const CONTINUES_DIR = path.join(homeDir(), '.continues');
 const INDEX_FILE = path.join(CONTINUES_DIR, 'sessions.jsonl');
@@ -21,10 +22,12 @@ const ENV_FINGERPRINT_PREFIX = '#env:';
  * Build a fingerprint of environment variables that affect parser storage paths.
  * When any of these env vars change, the cached index must be rebuilt.
  */
-function computeEnvFingerprint(): string {
+function computeEnvFingerprint(source?: SessionSource): string {
   const seen = new Set<string>();
   const parts: string[] = [];
-  for (const adapter of Object.values(adapters)) {
+  const selectedAdapters = source ? [adapters[source]] : Object.values(adapters);
+  for (const adapter of selectedAdapters) {
+    if (!adapter) continue;
     if (adapter.envVar && !seen.has(adapter.envVar)) {
       seen.add(adapter.envVar);
       const val = process.env[adapter.envVar] || '';
@@ -38,9 +41,9 @@ function computeEnvFingerprint(): string {
 /**
  * Read the env fingerprint stored in the first line of the index file.
  */
-function readStoredFingerprint(): string | null {
+function readStoredFingerprint(indexFile: string): string | null {
   try {
-    const content = fs.readFileSync(INDEX_FILE, 'utf8');
+    const content = fs.readFileSync(indexFile, 'utf8');
     const firstLine = content.slice(0, content.indexOf('\n'));
     if (firstLine.startsWith(ENV_FINGERPRINT_PREFIX)) {
       return firstLine.slice(ENV_FINGERPRINT_PREFIX.length);
@@ -50,6 +53,25 @@ function readStoredFingerprint(): string | null {
     logger.debug('index: failed to read stored fingerprint', err);
     return null;
   }
+}
+
+function sourceIndexFile(source: SessionSource): string {
+  return path.join(CONTINUES_DIR, `sessions.${source}.jsonl`);
+}
+
+function serializeSessions(sessions: UnifiedSession[]): string[] {
+  return sessions.map((s) =>
+    JSON.stringify({
+      ...s,
+      createdAt: s.createdAt.toISOString(),
+      updatedAt: s.updatedAt.toISOString(),
+    }),
+  );
+}
+
+function writeIndexFile(indexFile: string, sessions: UnifiedSession[], source?: SessionSource): void {
+  const fingerprint = `${ENV_FINGERPRINT_PREFIX}${computeEnvFingerprint(source)}`;
+  fs.writeFileSync(indexFile, fingerprint + '\n' + serializeSessions(sessions).join('\n') + '\n');
 }
 
 /**
@@ -71,15 +93,16 @@ export function ensureDirectories(): void {
 /**
  * Check if index needs rebuilding
  */
-export function indexNeedsRebuild(): boolean {
+export function indexNeedsRebuild(source?: SessionSource): boolean {
+  const indexFile = source ? sourceIndexFile(source) : INDEX_FILE;
   try {
-    const stats = fs.statSync(INDEX_FILE);
+    const stats = fs.statSync(indexFile);
     const age = Date.now() - stats.mtime.getTime();
     if (age > INDEX_TTL) return true;
 
     // Rebuild if env vars affecting storage paths have changed
-    const stored = readStoredFingerprint();
-    if (stored !== computeEnvFingerprint()) {
+    const stored = readStoredFingerprint(indexFile);
+    if (stored !== computeEnvFingerprint(source)) {
       logger.debug('index: env fingerprint changed, rebuilding');
       return true;
     }
@@ -114,26 +137,58 @@ export async function buildIndex(force = false): Promise<UnifiedSession[]> {
   allSessions.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
 
   // Write to index file — first line is the env fingerprint
-  const lines = allSessions.map((s) =>
-    JSON.stringify({
-      ...s,
-      createdAt: s.createdAt.toISOString(),
-      updatedAt: s.updatedAt.toISOString(),
-    }),
-  );
+  writeIndexFile(INDEX_FILE, allSessions);
 
-  const fingerprint = `${ENV_FINGERPRINT_PREFIX}${computeEnvFingerprint()}`;
-  fs.writeFileSync(INDEX_FILE, fingerprint + '\n' + lines.join('\n') + '\n');
+  const sessionsBySource = new Map<SessionSource, UnifiedSession[]>();
+  for (const session of allSessions) {
+    const sourceSessions = sessionsBySource.get(session.source) ?? [];
+    sourceSessions.push(session);
+    sessionsBySource.set(session.source, sourceSessions);
+  }
+  for (const [source, sourceSessions] of sessionsBySource) {
+    writeIndexFile(sourceIndexFile(source), sourceSessions, source);
+  }
 
   return allSessions;
 }
 
 /**
+ * Build or load the index for a single source without rebuilding every adapter.
+ */
+export async function buildSourceIndex(
+  source: SessionSource,
+  force = false,
+  parseOptions: SessionParseOptions = { lightweight: true },
+): Promise<UnifiedSession[]> {
+  ensureDirectories();
+
+  if (!force && !indexNeedsRebuild(source)) {
+    return loadIndex(source);
+  }
+
+  // If the global cache is fresh, derive the source cache from it instead of parsing.
+  if (!force && !indexNeedsRebuild()) {
+    const sourceSessions = loadIndex().filter((session) => session.source === source);
+    writeIndexFile(sourceIndexFile(source), sourceSessions, source);
+    return sourceSessions;
+  }
+
+  const adapter = adapters[source];
+  if (!adapter) return [];
+
+  const sessions = await adapter.parseSessions(parseOptions);
+  sessions.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+  writeIndexFile(sourceIndexFile(source), sessions, source);
+  return sessions;
+}
+
+/**
  * Load sessions from the index file
  */
-export function loadIndex(): UnifiedSession[] {
+export function loadIndex(source?: SessionSource): UnifiedSession[] {
+  const indexFile = source ? sourceIndexFile(source) : INDEX_FILE;
   try {
-    const content = fs.readFileSync(INDEX_FILE, 'utf8');
+    const content = fs.readFileSync(indexFile, 'utf8');
     const lines = content
       .trim()
       .split('\n')
@@ -155,7 +210,7 @@ export function loadIndex(): UnifiedSession[] {
       }
     });
   } catch (err) {
-    logger.debug('index: cannot read cache file', INDEX_FILE, err);
+    logger.debug('index: cannot read cache file', indexFile, err);
     return []; // File doesn't exist or can't be read
   }
 }
@@ -171,8 +226,27 @@ export async function getAllSessions(forceRebuild = false): Promise<UnifiedSessi
  * Get sessions filtered by source
  */
 export async function getSessionsBySource(source: SessionSource, forceRebuild = false): Promise<UnifiedSession[]> {
-  const all = await getAllSessions(forceRebuild);
-  return all.filter((s) => s.source === source);
+  return buildSourceIndex(source, forceRebuild, { lightweight: true });
+}
+
+/**
+ * Get current-working-directory sessions from sources that support direct cwd lookup.
+ */
+export async function getSessionsByCwd(cwd: string, forceRebuild = false): Promise<UnifiedSession[]> {
+  if (!forceRebuild && !indexNeedsRebuild()) {
+    return loadIndex().filter((session) => matchesCwd(session.cwd, cwd));
+  }
+
+  const cwdLookupAdapters = Object.values(adapters).filter((adapter) => adapter.supportsCwdLookup);
+  const results = await Promise.allSettled(
+    cwdLookupAdapters.map((adapter) => adapter.parseSessions({ cwd, lightweight: true })),
+  );
+
+  return results
+    .filter((result): result is PromiseFulfilledResult<UnifiedSession[]> => result.status === 'fulfilled')
+    .flatMap((result) => result.value)
+    .filter((session) => matchesCwd(session.cwd, cwd))
+    .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
 }
 
 /**

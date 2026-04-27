@@ -14,7 +14,7 @@ import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
 // Create the fake home eagerly so it's ready before any mock evaluates
 const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'continues-env-test-'));
@@ -64,9 +64,27 @@ function makeSession(id: string, source = 'claude'): Record<string, unknown> {
   };
 }
 
+function currentFingerprint(): string {
+  const seen = new Set<string>();
+  const parts: string[] = [];
+  for (const adapter of Object.values(adapters) as Array<{ envVar?: string }>) {
+    if (adapter.envVar && !seen.has(adapter.envVar)) {
+      seen.add(adapter.envVar);
+      const val = process.env[adapter.envVar] || '';
+      parts.push(`${adapter.envVar}=${val}`);
+    }
+  }
+  const hash = createHash('sha256').update(parts.sort().join('|')).digest('hex');
+  return `#env:${hash}`;
+}
+
 afterEach(() => {
   // Clean the index file between tests
-  try { fs.unlinkSync(indexFilePath()); } catch (_) { /* file may not exist */ }
+  try {
+    fs.unlinkSync(indexFilePath());
+  } catch (_) {
+    /* file may not exist */
+  }
   vi.unstubAllEnvs();
 });
 
@@ -81,37 +99,14 @@ describe('env fingerprint cache invalidation (issue #18)', () => {
     // Compute what the real module would write — import adapters to derive env vars
     // The simplest way: write an index via the fingerprint the module itself expects.
     // We write a fingerprint that matches the current env (all env vars unset in test).
-    const seen = new Set<string>();
-    const parts: string[] = [];
-    for (const adapter of Object.values(adapters) as Array<{ envVar?: string }>) {
-      if (adapter.envVar && !seen.has(adapter.envVar)) {
-        seen.add(adapter.envVar);
-        const val = process.env[adapter.envVar] || '';
-        parts.push(`${adapter.envVar}=${val}`);
-      }
-    }
-    const hash = createHash('sha256').update(parts.sort().join('|')).digest('hex');
-    const fingerprint = `#env:${hash}`;
-
-    writeIndex(fingerprint, [makeSession('sess-1')]);
+    writeIndex(currentFingerprint(), [makeSession('sess-1')]);
 
     expect(indexNeedsRebuild()).toBe(false);
   });
 
   it('indexNeedsRebuild returns true when CLAUDE_CONFIG_DIR changes', () => {
     // Write index with current fingerprint (CLAUDE_CONFIG_DIR unset)
-    const seen = new Set<string>();
-    const parts: string[] = [];
-    for (const adapter of Object.values(adapters) as Array<{ envVar?: string }>) {
-      if (adapter.envVar && !seen.has(adapter.envVar)) {
-        seen.add(adapter.envVar);
-        const val = process.env[adapter.envVar] || '';
-        parts.push(`${adapter.envVar}=${val}`);
-      }
-    }
-    const hash = createHash('sha256').update(parts.sort().join('|')).digest('hex');
-    const fingerprint = `#env:${hash}`;
-    writeIndex(fingerprint, [makeSession('sess-1')]);
+    writeIndex(currentFingerprint(), [makeSession('sess-1')]);
 
     // Now change the env var — fingerprint should mismatch
     vi.stubEnv('CLAUDE_CONFIG_DIR', '/home/user/.claude-work');
@@ -119,11 +114,16 @@ describe('env fingerprint cache invalidation (issue #18)', () => {
     expect(indexNeedsRebuild()).toBe(true);
   });
 
+  it('indexNeedsRebuild returns true when COPILOT_HOME changes', () => {
+    writeIndex(currentFingerprint(), [makeSession('sess-1', 'copilot')]);
+
+    vi.stubEnv('COPILOT_HOME', '/home/user/.copilot-work');
+
+    expect(indexNeedsRebuild()).toBe(true);
+  });
+
   it('loadIndex skips the fingerprint line and returns only sessions', () => {
-    writeIndex('#env:CLAUDE_CONFIG_DIR=', [
-      makeSession('sess-1', 'claude'),
-      makeSession('sess-2', 'codex'),
-    ]);
+    writeIndex('#env:CLAUDE_CONFIG_DIR=', [makeSession('sess-1', 'claude'), makeSession('sess-2', 'codex')]);
 
     const sessions = loadIndex();
 
@@ -138,7 +138,6 @@ describe('env fingerprint cache invalidation (issue #18)', () => {
   });
 
   it('fingerprint line is not parseable as JSON', () => {
-    const hash = createHash('sha256').update('test').digest('hex');
-    expect(() => JSON.parse(`#env:\${hash}`)).toThrow();
+    expect(() => JSON.parse('#env:test')).toThrow();
   });
 });

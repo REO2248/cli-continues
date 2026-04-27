@@ -1,5 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import type { VerbosityConfig } from '../config/index.js';
+import { getPreset } from '../config/index.js';
 import { logger } from '../logger.js';
 import type { ConversationMessage, SessionContext, SessionNotes, UnifiedSession } from '../types/index.js';
 import type {
@@ -12,13 +14,11 @@ import type {
 } from '../types/schemas.js';
 import { DroidSettingsSchema } from '../types/schemas.js';
 import { isSystemContent } from '../utils/content.js';
-import { listSubdirectories } from '../utils/fs-helpers.js';
-import { getFileStats, readJsonlFile, scanJsonlHead } from '../utils/jsonl.js';
+import { findFiles } from '../utils/fs-helpers.js';
+import { getFileStats, readJsonlFile, scanJsonlFile } from '../utils/jsonl.js';
 import { generateHandoffMarkdown } from '../utils/markdown.js';
 import { cleanSummary, extractRepoFromCwd, homeDir } from '../utils/parser-helpers.js';
 import { cwdFromSlug } from '../utils/slug.js';
-import type { VerbosityConfig } from '../config/index.js';
-import { getPreset } from '../config/index.js';
 import {
   type AnthropicMessage,
   extractAnthropicToolData,
@@ -26,28 +26,29 @@ import {
 } from '../utils/tool-extraction.js';
 import { truncate } from '../utils/tool-summarizer.js';
 
+const DROID_PROJECTS_DIR = path.join(homeDir(), '.factory', 'projects');
 const DROID_SESSIONS_DIR = path.join(homeDir(), '.factory', 'sessions');
+const DROID_SESSION_DIRS = [DROID_PROJECTS_DIR, DROID_SESSIONS_DIR];
 
 /**
  * Find all Droid session JSONL files.
- * Structure: ~/.factory/sessions/<workspace-slug>/<uuid>.jsonl
+ * Structures:
+ * - ~/.factory/projects/<workspace-slug>/<uuid>.jsonl
+ * - ~/.factory/sessions/<workspace-slug>/<uuid>.jsonl
  */
 async function findSessionFiles(): Promise<string[]> {
-  const files: string[] = [];
-  for (const wsPath of listSubdirectories(DROID_SESSIONS_DIR)) {
-    try {
-      const entries = fs.readdirSync(wsPath, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isFile() && entry.name.endsWith('.jsonl')) {
-          files.push(path.join(wsPath, entry.name));
-        }
-      }
-    } catch (err) {
-      logger.debug('droid: cannot read session directory', wsPath, err);
-      // Skip directories we can't read
+  const files = new Set<string>();
+  for (const root of DROID_SESSION_DIRS) {
+    for (const filePath of findFiles(root, {
+      match: (entry) =>
+        entry.name.endsWith('.jsonl') &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/i.test(entry.name),
+      maxDepth: 3,
+    })) {
+      files.add(filePath);
     }
   }
-  return files;
+  return Array.from(files);
 }
 
 /**
@@ -82,19 +83,19 @@ async function parseSessionInfo(filePath: string): Promise<{
   let firstTimestamp = '';
   let lastTimestamp = '';
 
-  await scanJsonlHead(filePath, 100, (parsed) => {
+  await scanJsonlFile(filePath, (parsed) => {
     const event = parsed as DroidEvent;
 
     if (event.type === 'session_start' && !sessionStart) {
       sessionStart = event;
     }
 
-    if (event.type === 'message') {
-      if (event.timestamp) {
-        if (!firstTimestamp) firstTimestamp = event.timestamp;
-        lastTimestamp = event.timestamp;
-      }
+    if ('timestamp' in event && typeof event.timestamp === 'string') {
+      if (!firstTimestamp) firstTimestamp = event.timestamp;
+      lastTimestamp = event.timestamp;
+    }
 
+    if (event.type === 'message') {
       if (!firstUserMessage && event.message.role === 'user') {
         for (const block of event.message.content) {
           if (block.type === 'text' && block.text) {
@@ -118,7 +119,7 @@ async function parseSessionInfo(filePath: string): Promise<{
  */
 export async function parseDroidSessions(): Promise<UnifiedSession[]> {
   const files = await findSessionFiles();
-  const sessions: UnifiedSession[] = [];
+  const sessionsById = new Map<string, UnifiedSession>();
 
   for (const filePath of files) {
     try {
@@ -137,7 +138,7 @@ export async function parseDroidSessions(): Promise<UnifiedSession[]> {
       const createdAt = firstTimestamp ? new Date(firstTimestamp) : fileStats.birthtime;
       const updatedAt = lastTimestamp ? new Date(lastTimestamp) : fileStats.mtime;
 
-      sessions.push({
+      const nextSession: UnifiedSession = {
         id: sessionStart.id,
         source: 'droid',
         cwd,
@@ -149,14 +150,24 @@ export async function parseDroidSessions(): Promise<UnifiedSession[]> {
         originalPath: filePath,
         summary: summary || sessionStart.sessionTitle || undefined,
         model: settings?.model,
-      });
+      };
+
+      const existing = sessionsById.get(nextSession.id);
+      const existingTime = existing?.updatedAt.getTime() ?? 0;
+      const nextTime = nextSession.updatedAt.getTime();
+      const nextIsProjectTranscript = nextSession.originalPath.startsWith(DROID_PROJECTS_DIR);
+      if (!existing || existingTime < nextTime || (existingTime === nextTime && nextIsProjectTranscript)) {
+        sessionsById.set(nextSession.id, nextSession);
+      }
     } catch (err) {
       logger.debug('droid: skipping unparseable session', filePath, err);
       // Skip files we can't parse
     }
   }
 
-  return sessions.filter((s) => s.lines > 1).sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+  return Array.from(sessionsById.values())
+    .filter((s) => s.lines > 1)
+    .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
 }
 
 /**
@@ -277,7 +288,15 @@ export async function extractDroidContext(session: UnifiedSession, config?: Verb
 
   const trimmed = recentMessages.slice(-resolvedConfig.recentMessages);
 
-  const markdown = generateHandoffMarkdown(session, trimmed, filesModified, pendingTasks, toolSummaries, sessionNotes, resolvedConfig);
+  const markdown = generateHandoffMarkdown(
+    session,
+    trimmed,
+    filesModified,
+    pendingTasks,
+    toolSummaries,
+    sessionNotes,
+    resolvedConfig,
+  );
 
   return {
     session: sessionNotes?.model ? { ...session, model: sessionNotes.model } : session,

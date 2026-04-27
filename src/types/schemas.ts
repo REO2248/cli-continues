@@ -119,6 +119,7 @@ export const CodexResponseItemSchema = z
         type: z.string().optional(),
         role: z.string().optional(),
         name: z.string().optional(),
+        namespace: z.string().optional(),
         arguments: z.string().optional(),
         call_id: z.string().optional(),
         input: z.string().optional(),
@@ -150,17 +151,33 @@ export const CodexTurnContextSchema = z
   })
   .passthrough();
 
+export const CodexCompactedSchema = z
+  .object({
+    timestamp: z.string(),
+    type: z.literal('compacted'),
+    payload: z
+      .object({
+        message: z.string().optional(),
+        replacement_history: z.unknown().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
 export const CodexMessageSchema = z.discriminatedUnion('type', [
   CodexSessionMetaSchema,
   CodexEventMsgSchema,
   CodexResponseItemSchema,
   CodexTurnContextSchema,
+  CodexCompactedSchema,
 ]);
 
 export type CodexSessionMeta = z.infer<typeof CodexSessionMetaSchema>;
 export type CodexEventMsg = z.infer<typeof CodexEventMsgSchema>;
 export type CodexResponseItem = z.infer<typeof CodexResponseItemSchema>;
 export type CodexTurnContext = z.infer<typeof CodexTurnContextSchema>;
+export type CodexCompacted = z.infer<typeof CodexCompactedSchema>;
 export type CodexMessage = z.infer<typeof CodexMessageSchema>;
 
 // ── Copilot ─────────────────────────────────────────────────────────────────

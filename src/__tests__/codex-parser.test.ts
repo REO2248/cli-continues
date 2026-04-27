@@ -153,4 +153,137 @@ describe('codex parser hardening', () => {
     expect(context.sessionNotes?.cacheTokens).toEqual({ creation: 0, read: 17 });
     expect(context.sessionNotes?.thinkingTokens).toBe(9);
   });
+
+  it('extracts plaintext compacted payload.message as compact summary', async () => {
+    const home = makeCodexHome();
+    const originalPath = writeRollout(
+      home,
+      path.join('sessions', '2026', '04', '15'),
+      'rollout-2026-04-15T10-00-00-compact-session-id.jsonl',
+      [
+        {
+          timestamp: '2026-04-15T10:00:00.000Z',
+          type: 'session_meta',
+          payload: { id: 'compact-session-id', cwd: '/tmp/project' },
+        },
+        {
+          timestamp: '2026-04-15T10:00:01.000Z',
+          type: 'compacted',
+          payload: {
+            message: 'Keep the parser findings and pending fixes.',
+            replacement_history: [{ content: 'do not include this injected content' }],
+          },
+        },
+      ],
+    );
+
+    const { extractCodexContext } = await loadCodexParser(home);
+    const context = await extractCodexContext({
+      id: 'compact-session-id',
+      source: 'codex',
+      cwd: '/tmp/project',
+      lines: 2,
+      bytes: fs.statSync(originalPath).size,
+      createdAt: new Date('2026-04-15T10:00:00.000Z'),
+      updatedAt: new Date('2026-04-15T10:00:01.000Z'),
+      originalPath,
+    });
+
+    expect(context.sessionNotes?.compactSummary).toBe('Keep the parser findings and pending fixes.');
+    expect(context.sessionNotes?.compactSummary).not.toContain('injected');
+  });
+
+  it('tracks namespaced edit_file function calls as edits and modified files', async () => {
+    const home = makeCodexHome();
+    const originalPath = writeRollout(
+      home,
+      path.join('sessions', '2026', '04', '15'),
+      'rollout-2026-04-15T10-00-00-edit-file-session-id.jsonl',
+      [
+        {
+          timestamp: '2026-04-15T10:00:00.000Z',
+          type: 'session_meta',
+          payload: { id: 'edit-file-session-id', cwd: '/tmp/project' },
+        },
+        {
+          timestamp: '2026-04-15T10:00:01.000Z',
+          type: 'response_item',
+          payload: {
+            type: 'function_call',
+            name: 'edit_file',
+            namespace: 'mcp__morph__',
+            call_id: 'call-edit',
+            arguments: JSON.stringify({
+              path: 'src/parsers/codex.ts',
+              code_edit: '// ... existing code ...\nconst fixed = true;',
+            }),
+          },
+        },
+        {
+          timestamp: '2026-04-15T10:00:02.000Z',
+          type: 'response_item',
+          payload: { type: 'function_call_output', call_id: 'call-edit', output: 'updated' },
+        },
+      ],
+    );
+
+    const { extractCodexContext } = await loadCodexParser(home);
+    const context = await extractCodexContext({
+      id: 'edit-file-session-id',
+      source: 'codex',
+      cwd: '/tmp/project',
+      lines: 3,
+      bytes: fs.statSync(originalPath).size,
+      createdAt: new Date('2026-04-15T10:00:00.000Z'),
+      updatedAt: new Date('2026-04-15T10:00:02.000Z'),
+      originalPath,
+    });
+
+    expect(context.filesModified).toContain('src/parsers/codex.ts');
+    const editSummary = context.toolSummaries.find((summary) => summary.name === 'mcp__morph__edit_file');
+    expect(editSummary?.samples[0].data).toMatchObject({
+      category: 'edit',
+      filePath: 'src/parsers/codex.ts',
+    });
+  });
+
+  it('summarizes write_stdin chars payloads', async () => {
+    const home = makeCodexHome();
+    const originalPath = writeRollout(
+      home,
+      path.join('sessions', '2026', '04', '15'),
+      'rollout-2026-04-15T10-00-00-stdin-session-id.jsonl',
+      [
+        {
+          timestamp: '2026-04-15T10:00:00.000Z',
+          type: 'session_meta',
+          payload: { id: 'stdin-session-id', cwd: '/tmp/project' },
+        },
+        {
+          timestamp: '2026-04-15T10:00:01.000Z',
+          type: 'response_item',
+          payload: {
+            type: 'function_call',
+            name: 'write_stdin',
+            arguments: JSON.stringify({ chars: 'y\n' }),
+          },
+        },
+      ],
+    );
+
+    const { extractCodexContext } = await loadCodexParser(home);
+    const context = await extractCodexContext({
+      id: 'stdin-session-id',
+      source: 'codex',
+      cwd: '/tmp/project',
+      lines: 2,
+      bytes: fs.statSync(originalPath).size,
+      createdAt: new Date('2026-04-15T10:00:00.000Z'),
+      updatedAt: new Date('2026-04-15T10:00:01.000Z'),
+      originalPath,
+    });
+
+    const stdinSummary = context.toolSummaries.find((summary) => summary.name === 'write_stdin');
+    expect(stdinSummary?.samples[0].summary).toContain('y');
+  });
 });

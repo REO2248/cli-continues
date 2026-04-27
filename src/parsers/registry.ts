@@ -1,6 +1,6 @@
 import chalk from 'chalk';
 import type { VerbosityConfig } from '../config/index.js';
-import type { SessionContext, SessionSource, UnifiedSession } from '../types/index.js';
+import type { SessionContext, SessionParseOptions, SessionSource, UnifiedSession } from '../types/index.js';
 import { TOOL_NAMES } from '../types/tool-names.js';
 import {
   type FlagOccurrence,
@@ -48,8 +48,10 @@ export interface ToolAdapter {
   envVar?: string;
   /** CLI binary name for availability checks and spawning */
   binaryName: string;
-  /** Discover and index all sessions */
-  parseSessions: () => Promise<UnifiedSession[]>;
+  /** Discover and index sessions. Parsers may ignore unsupported options. */
+  parseSessions: (options?: SessionParseOptions) => Promise<UnifiedSession[]>;
+  /** True when parseSessions({ cwd }) can avoid a full global scan. */
+  supportsCwdLookup?: boolean;
   /** Extract full context for cross-tool handoff */
   extractContext: (session: UnifiedSession, config?: VerbosityConfig) => Promise<SessionContext>;
   /** CLI args to resume a session natively */
@@ -664,6 +666,7 @@ register({
   envVar: 'CLAUDE_CONFIG_DIR',
   binaryName: 'claude',
   parseSessions: parseClaudeSessions,
+  supportsCwdLookup: true,
   extractContext: extractClaudeContext,
   nativeResumeArgs: (s) => ['--resume', s.id],
   crossToolArgs: (prompt) => [prompt],
@@ -681,9 +684,9 @@ register({
   binaryName: 'codex',
   parseSessions: parseCodexSessions,
   extractContext: extractCodexContext,
-  nativeResumeArgs: (s) => ['-c', `experimental_resume=${s.originalPath}`],
+  nativeResumeArgs: (s) => ['resume', s.id],
   crossToolArgs: (prompt) => [prompt],
-  resumeCommandDisplay: (s) => `codex -c experimental_resume="${s.originalPath}"`,
+  resumeCommandDisplay: (s) => `codex resume ${s.id}`,
   mapHandoffFlags: mapCodexFlags,
 });
 
@@ -693,6 +696,7 @@ register({
   label: 'GitHub Copilot CLI',
   color: chalk.green,
   storagePath: '~/.copilot/session-state/',
+  envVar: 'COPILOT_HOME',
   binaryName: 'copilot',
   parseSessions: parseCopilotSessions,
   extractContext: extractCopilotContext,
@@ -739,13 +743,13 @@ register({
   name: 'droid',
   label: 'Factory Droid',
   color: chalk.red,
-  storagePath: '~/.factory/sessions/',
+  storagePath: '~/.factory/projects/ (fallback: ~/.factory/sessions/)',
   binaryName: 'droid',
   parseSessions: parseDroidSessions,
   extractContext: extractDroidContext,
-  nativeResumeArgs: (s) => ['-s', s.id],
+  nativeResumeArgs: (s) => ['--resume', s.id],
   crossToolArgs: (prompt) => ['exec', prompt],
-  resumeCommandDisplay: (s) => `droid -s ${s.id}`,
+  resumeCommandDisplay: (s) => `droid --resume ${s.id}`,
   mapHandoffFlags: mapDroidFlags,
 });
 

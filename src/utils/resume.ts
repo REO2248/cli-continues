@@ -31,7 +31,8 @@ export function resolveCrossToolForwarding(
   options?: HandoffForwardingOptions,
 ): ForwardResolution {
   const adapter = adapters[target];
-  return resolveTargetForwarding(target, adapter?.mapHandoffFlags, options);
+  if (!adapter) throw new Error(`Unknown target: ${target}`);
+  return resolveTargetForwarding(target, adapter.mapHandoffFlags, options);
 }
 
 function hasConfigOverride(args: string[], key: string): boolean {
@@ -127,6 +128,9 @@ export async function crossToolResume(
   forwarding?: HandoffForwardingOptions,
   contextOptions?: HandoffContextOptions,
 ): Promise<void> {
+  const adapter = adapters[target];
+  if (!adapter) throw new Error(`Unknown target: ${target}`);
+
   const context = await extractContext(session, resolveHandoffConfig(contextOptions));
   const cwd = session.cwd || process.cwd();
 
@@ -156,9 +160,6 @@ export async function crossToolResume(
     : mode === 'inline'
       ? buildInlinePrompt(context, session)
       : buildReferencePrompt(session);
-
-  const adapter = adapters[target];
-  if (!adapter) throw new Error(`Unknown target: ${target}`);
 
   if (contextOptions?.debugPrompt) {
     console.log(prompt);
@@ -327,9 +328,11 @@ export function getResumeCommand(
   forwarding?: HandoffForwardingOptions,
 ): string {
   const actualTarget = target || session.source;
+  const actualAdapter = adapters[actualTarget];
+  if (!actualAdapter) throw new Error(`Unknown target: ${actualTarget}`);
 
   if (actualTarget === session.source) {
-    return adapters[session.source].resumeCommandDisplay(session);
+    return actualAdapter.resumeCommandDisplay(session);
   }
 
   const resolved = resolveCrossToolForwarding(actualTarget, forwarding);

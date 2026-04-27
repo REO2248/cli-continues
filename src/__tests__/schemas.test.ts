@@ -12,6 +12,7 @@ import {
 } from '../types/content-blocks.js';
 import {
   ClaudeMessageSchema,
+  CodexCompactedSchema,
   CodexEventMsgSchema,
   CodexMessageSchema,
   CodexResponseItemSchema,
@@ -47,8 +48,22 @@ describe('TOOL_NAMES', () => {
 
   it('includes all known tools', () => {
     const expected: SessionSource[] = [
-      'claude', 'codex', 'copilot', 'gemini', 'opencode', 'droid', 'cursor',
-      'amp', 'kiro', 'crush', 'cline', 'roo-code', 'kilo-code', 'antigravity', 'kimi', 'qwen-code',
+      'claude',
+      'codex',
+      'copilot',
+      'gemini',
+      'opencode',
+      'droid',
+      'cursor',
+      'amp',
+      'kiro',
+      'crush',
+      'cline',
+      'roo-code',
+      'kilo-code',
+      'antigravity',
+      'kimi',
+      'qwen-code',
     ];
     expect([...TOOL_NAMES]).toEqual(expected);
   });
@@ -69,14 +84,17 @@ describe('Canonical tool name sets', () => {
     expect(READ_TOOLS.has('read_file')).toBe(true);
   });
 
-  it('WRITE_TOOLS contains Write and create_file', () => {
+  it('WRITE_TOOLS contains Write and create aliases', () => {
     expect(WRITE_TOOLS.has('Write')).toBe(true);
+    expect(WRITE_TOOLS.has('create')).toBe(true);
     expect(WRITE_TOOLS.has('create_file')).toBe(true);
   });
 
-  it('EDIT_TOOLS contains Edit and apply_diff', () => {
+  it('EDIT_TOOLS contains Edit, apply_diff, and Morph edit aliases', () => {
     expect(EDIT_TOOLS.has('Edit')).toBe(true);
     expect(EDIT_TOOLS.has('apply_diff')).toBe(true);
+    expect(EDIT_TOOLS.has('mcp__morph__edit_file')).toBe(true);
+    expect(EDIT_TOOLS.has('morph___edit_file')).toBe(true);
   });
 });
 
@@ -305,6 +323,15 @@ describe('CodexMessageSchema (discriminated union)', () => {
     expect(result.success).toBe(true);
   });
 
+  it('accepts compacted', () => {
+    const result = CodexCompactedSchema.safeParse({
+      timestamp: '2025-01-01T00:00:00Z',
+      type: 'compacted',
+      payload: { message: 'Compacted session summary' },
+    });
+    expect(result.success).toBe(true);
+  });
+
   it('discriminates correctly in union', () => {
     const meta = {
       timestamp: '2025-01-01T00:00:00Z',
@@ -314,6 +341,16 @@ describe('CodexMessageSchema (discriminated union)', () => {
     const result = CodexMessageSchema.safeParse(meta);
     expect(result.success).toBe(true);
     if (result.success) expect(result.data.type).toBe('session_meta');
+  });
+
+  it('discriminates compacted in union', () => {
+    const result = CodexMessageSchema.safeParse({
+      timestamp: '2025-01-01T00:00:00Z',
+      type: 'compacted',
+      payload: { message: 'Compacted session summary' },
+    });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.type).toBe('compacted');
   });
 
   it('rejects unknown type in union', () => {
