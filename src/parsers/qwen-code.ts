@@ -391,7 +391,7 @@ function collectParentFunctionCalls(records: QwenChatRecord[]): Map<string, Pare
 function findParentFunctionCall(
   callsByParent: Map<string, ParentFunctionCall[]>,
   record: QwenChatRecord,
-  displayName: string,
+  displayName: string | undefined,
 ): ParentFunctionCall | undefined {
   if (!record.parentUuid) return undefined;
   const calls = callsByParent.get(record.parentUuid);
@@ -402,6 +402,8 @@ function findParentFunctionCall(
     const byId = calls.find((call) => call.callId === resultCallId);
     if (byId) return byId;
   }
+
+  if (!displayName) return undefined;
 
   const byName = calls.filter((call) => call.name === displayName);
   if (byName.length === 1) return byName[0];
@@ -668,6 +670,11 @@ function findExternalToolResponse(
   return byParentName.length === 1 ? byParentName[0] : undefined;
 }
 
+function findToolResultResponse(responses: ToolResponses, record: QwenChatRecord): ToolResponseInfo | undefined {
+  const callId = getCallId(record.toolCallResult);
+  return callId ? responses.byCallId.get(callId) : undefined;
+}
+
 function hasConfirmedDiffForCall(
   refs: ConfirmedDiffRefs,
   parentUuid: string,
@@ -826,11 +833,15 @@ function extractToolData(
     // Extract confirmed file modifications from tool_result records.
     if (record.type === 'tool_result' && record.toolCallResult) {
       const tcr = record.toolCallResult;
-      const displayName = tcr.displayName || '';
       const isError = isToolResultError(tcr.status);
 
-      if (displayName && isFileDiff(tcr.resultDisplay)) {
-        const parentCall = findParentFunctionCall(callsByParent, record, displayName);
+      if (isFileDiff(tcr.resultDisplay)) {
+        const response = findToolResultResponse(responses, record);
+        const resultDisplayName = tcr.displayName || undefined;
+        const parentCall = findParentFunctionCall(callsByParent, record, resultDisplayName ?? response?.name);
+        const displayName = resultDisplayName ?? parentCall?.name ?? response?.name;
+        if (!displayName) continue;
+
         addFileDiffSummary(collector, displayName, tcr.resultDisplay, parentCall, isError);
       }
     }

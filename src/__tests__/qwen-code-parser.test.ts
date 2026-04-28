@@ -527,6 +527,64 @@ describe('qwen-code parser', () => {
     });
   });
 
+  it('preserves callId-matched file diffs when tool_result displayName is absent', async () => {
+    const dir = makeTempDir();
+    const sessionPath = path.join(dir, `${SESSION_ID}.jsonl`);
+    writeJsonl(sessionPath, [
+      qwenRecord({
+        uuid: 'u1',
+        message: { role: 'user', parts: [{ text: 'Patch the app entrypoint.' }] },
+      }),
+      qwenRecord({
+        uuid: 'a-edit',
+        parentUuid: 'u1',
+        timestamp: '2026-01-15T10:01:00.000Z',
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-edit-app',
+                name: 'Edit',
+                args: { file_path: '/workspaces/acme/widget/src/app.ts' },
+              },
+            },
+          ],
+        },
+      }),
+      qwenRecord({
+        uuid: 't-edit',
+        parentUuid: 'a-edit',
+        timestamp: '2026-01-15T10:02:00.000Z',
+        type: 'tool_result',
+        toolCallResult: {
+          callId: 'call-edit-app',
+          status: 'success',
+          resultDisplay: {
+            fileName: 'app.ts',
+            fileDiff: '--- app.ts\n+++ app.ts\n-console.log("old");\n+console.log("new");',
+            originalContent: 'console.log("old");',
+            newContent: 'console.log("new");',
+            diffStat: { model_added_lines: 1, model_removed_lines: 1 },
+          },
+        },
+      }),
+    ]);
+
+    const context = await extractQwenCodeContext(sessionFor(sessionPath));
+    const editSummary = context.toolSummaries.find((summary) => summary.name === 'Edit');
+
+    expect(context.filesModified).toEqual(['/workspaces/acme/widget/src/app.ts']);
+    expect(editSummary?.count).toBe(1);
+    expect(editSummary?.samples[0]?.summary).toContain('edit /workspaces/acme/widget/src/app.ts (+1 -1 lines)');
+    expect(editSummary?.samples[0]?.data).toMatchObject({
+      category: 'edit',
+      filePath: '/workspaces/acme/widget/src/app.ts',
+      diffStats: { added: 1, removed: 1 },
+    });
+  });
+
   it('generates context with assistant text, reasoning, pending tasks, and token notes', async () => {
     const dir = makeTempDir();
     const sessionPath = path.join(dir, `${SESSION_ID}.jsonl`);
