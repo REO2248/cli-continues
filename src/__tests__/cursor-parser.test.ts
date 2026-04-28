@@ -40,6 +40,16 @@ function writeCursorRepoJson(home: string, slug: string, data: unknown): void {
   fs.writeFileSync(path.join(dir, 'repo.json'), JSON.stringify(data), 'utf8');
 }
 
+function cursorTextRow(role: 'user' | 'assistant', text: string, timestamp: string): unknown {
+  return {
+    role,
+    timestamp,
+    message: {
+      content: [{ type: 'text', text }],
+    },
+  };
+}
+
 async function loadCursorParser(home: string): Promise<typeof import('../parsers/cursor.js')> {
   vi.resetModules();
   vi.doMock('../utils/parser-helpers.js', async (importOriginal) => {
@@ -154,6 +164,34 @@ describe('cursor parser hardening', () => {
     expect(sessions.find((session) => session.id === flatId)?.summary).toBe(
       'Flat transcript should also be discovered',
     );
+  });
+
+  it('orders long transcripts by filesystem recency instead of head-scan timestamps', async () => {
+    const home = makeCursorHome();
+    const olderId = '22222222-3333-4444-5555-666666666666';
+    const newerId = '33333333-4444-5555-6666-777777777777';
+    const olderPath = writeCursorTranscript(home, 'Users-test-project', olderId, [
+      cursorTextRow('user', 'Short transcript', '2026-04-15T11:00:00.000Z'),
+    ]);
+    const newerRows = Array.from({ length: 100 }, (_, index) =>
+      cursorTextRow(
+        index === 0 ? 'user' : 'assistant',
+        index === 0 ? 'Long transcript starts old' : `Filler response ${index}`,
+        new Date(Date.UTC(2026, 3, 15, 10, 0, index)).toISOString(),
+      ),
+    );
+    newerRows.push(cursorTextRow('assistant', 'Tail response after head scan', '2026-04-15T11:30:00.000Z'));
+    const newerPath = writeCursorTranscript(home, 'Users-test-project', newerId, newerRows);
+
+    fs.utimesSync(olderPath, new Date('2026-04-15T11:00:00.000Z'), new Date('2026-04-15T11:00:00.000Z'));
+    fs.utimesSync(newerPath, new Date('2026-04-15T11:30:00.000Z'), new Date('2026-04-15T11:30:00.000Z'));
+
+    const { parseCursorSessions } = await loadCursorParser(home);
+    const sessions = await parseCursorSessions();
+
+    expect(sessions[0].id).toBe(newerId);
+    expect(sessions[0].updatedAt.toISOString()).toBe('2026-04-15T11:30:00.000Z');
+    expect(sessions[1].id).toBe(olderId);
   });
 
   it('extracts context from string content, user_query wrappers, tools, and malformed records without throwing', async () => {

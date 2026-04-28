@@ -282,7 +282,6 @@ async function resolveProjectCwd(projectDir: string, slug: string): Promise<stri
 async function parseSessionInfo(filePath: string): Promise<{
   firstUserMessage: string;
   firstTimestamp?: Date;
-  lastTimestamp?: Date;
   lineCount: number;
   bytes: number;
   messageCount: number;
@@ -290,7 +289,6 @@ async function parseSessionInfo(filePath: string): Promise<{
 }> {
   let firstUserMessage = '';
   let firstTimestamp: Date | undefined;
-  let lastTimestamp: Date | undefined;
   let model: string | undefined;
   let messageCount = 0;
 
@@ -307,7 +305,6 @@ async function parseSessionInfo(filePath: string): Promise<{
     const timestamp = extractLineTimestamp(line);
     if (timestamp) {
       if (!firstTimestamp) firstTimestamp = timestamp;
-      lastTimestamp = timestamp;
     }
 
     model ??= extractLineModel(line);
@@ -329,7 +326,6 @@ async function parseSessionInfo(filePath: string): Promise<{
   return {
     firstUserMessage,
     firstTimestamp,
-    lastTimestamp,
     lineCount: stats.lines,
     bytes: stats.bytes,
     messageCount,
@@ -346,7 +342,7 @@ export async function parseCursorSessions(): Promise<UnifiedSession[]> {
 
   for (const filePath of files) {
     try {
-      const { firstUserMessage, firstTimestamp, lastTimestamp, lineCount, bytes, messageCount, model } =
+      const { firstUserMessage, firstTimestamp, lineCount, bytes, messageCount, model } =
         await parseSessionInfo(filePath);
       if (messageCount === 0) continue;
       const fileStats = fs.statSync(filePath);
@@ -363,7 +359,7 @@ export async function parseCursorSessions(): Promise<UnifiedSession[]> {
         lines: lineCount,
         bytes,
         createdAt: firstTimestamp ?? fileStats.birthtime,
-        updatedAt: lastTimestamp ?? fileStats.mtime,
+        updatedAt: fileStats.mtime,
         originalPath: filePath,
         summary: summary || undefined,
         model,
