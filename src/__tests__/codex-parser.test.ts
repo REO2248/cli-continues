@@ -286,4 +286,124 @@ describe('codex parser hardening', () => {
     const stdinSummary = context.toolSummaries.find((summary) => summary.name === 'write_stdin');
     expect(stdinSummary?.samples[0].summary).toContain('y');
   });
+
+  it('uses session_meta and rollout timestamps while keeping task_started out of tool summaries', async () => {
+    const home = makeCodexHome();
+    const originalPath = writeRollout(
+      home,
+      path.join('sessions', '2026', '04', '15'),
+      'rollout-2026-04-15T09-00-00-lifecycle-session-id.jsonl',
+      [
+        {
+          timestamp: '2026-04-15T10:00:00.000Z',
+          type: 'session_meta',
+          payload: {
+            id: 'lifecycle-session-id',
+            timestamp: '2026-04-15T09:59:58.500Z',
+            cwd: '/tmp/project',
+            originator: 'codex_cli_rs',
+            cli_version: '0.99.0',
+            source: 'vscode',
+            model_provider: 'openai',
+            git: {
+              branch: 'main',
+              repository_url: 'https://github.com/user/project.git',
+              commit_hash: '1234567890abcdef',
+            },
+          },
+        },
+        {
+          timestamp: '2026-04-15T10:00:01.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'task_started',
+            message: 'working',
+            turn_id: 'turn-1',
+            started_at: 1776077875,
+            model_context_window: 200000,
+            collaboration_mode_kind: 'default',
+          },
+        },
+        {
+          timestamp: '2026-04-15T10:00:02.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'turn_aborted',
+            message: 'interrupted',
+            reason: 'interrupted',
+            completed_at: 1776077876,
+            duration_ms: 47,
+          },
+        },
+      ],
+    );
+
+    const { parseCodexSessions, extractCodexContext } = await loadCodexParser(home);
+    const [session] = await parseCodexSessions();
+    const context = await extractCodexContext(session);
+
+    expect(originalPath).toContain('lifecycle-session-id');
+    expect(session.createdAt.toISOString()).toBe('2026-04-15T09:59:58.500Z');
+    expect(session.updatedAt.toISOString()).toBe('2026-04-15T10:00:02.000Z');
+    expect(session.gitSha).toBe('1234567890abcdef');
+    expect(context.toolSummaries.find((summary) => summary.name === 'task')).toBeUndefined();
+    expect(context.sessionNotes?.lifecycle?.map((entry) => entry.type)).toEqual(['task_started', 'turn_aborted']);
+    expect(context.sessionNotes?.lifecycle?.[0].metadata).toMatchObject({
+      started_at: 1776077875,
+      model_context_window: 200000,
+      collaboration_mode_kind: 'default',
+    });
+    expect(context.sessionNotes?.lifecycle?.[1].metadata).toMatchObject({
+      reason: 'interrupted',
+      completed_at: 1776077876,
+      duration_ms: 47,
+    });
+    expect(context.sessionNotes?.sourceMetadata).toMatchObject({
+      sessionTimestamp: '2026-04-15T09:59:58.500Z',
+      rolloutTimestamp: '2026-04-15T10:00:00.000Z',
+      source: 'vscode',
+      originator: 'codex_cli_rs',
+      cliVersion: '0.99.0',
+      modelProvider: 'openai',
+    });
+    expect(context.markdown).toContain('Lifecycle task_started');
+    expect(context.markdown).not.toContain('### Task');
+  });
+
+  it('falls back to git.sha when commit_hash is absent (covers both UnifiedSession and SessionNotes.sourceMetadata)', async () => {
+    const home = makeCodexHome();
+    const originalPath = writeRollout(
+      home,
+      path.join('sessions', '2026', '04', '15'),
+      'rollout-2026-04-15T11-00-00-shaonly-session-id.jsonl',
+      [
+        {
+          timestamp: '2026-04-15T11:00:00.000Z',
+          type: 'session_meta',
+          payload: {
+            id: 'shaonly-session-id',
+            cwd: '/tmp/project',
+            git: {
+              branch: 'main',
+              repository_url: 'https://github.com/user/project.git',
+              sha: 'fedcba0987654321',
+            },
+          },
+        },
+        {
+          timestamp: '2026-04-15T11:00:01.000Z',
+          type: 'event_msg',
+          payload: { type: 'user_message', message: 'hello' },
+        },
+      ],
+    );
+
+    const { parseCodexSessions, extractCodexContext } = await loadCodexParser(home);
+    const [session] = await parseCodexSessions();
+    const context = await extractCodexContext(session);
+
+    expect(originalPath).toContain('shaonly-session-id');
+    expect(session.gitSha).toBe('fedcba0987654321');
+    expect(context.sessionNotes?.sourceMetadata).toMatchObject({ gitSha: 'fedcba0987654321' });
+  });
 });

@@ -6,6 +6,7 @@ import { logger } from '../logger.js';
 import type {
   ConversationMessage,
   SessionContext,
+  SessionEvent,
   SessionNotes,
   SessionParseOptions,
   ToolUsageSummary,
@@ -14,7 +15,7 @@ import type {
 import type { CodexMessage, CodexSessionMeta } from '../types/schemas.js';
 import { countDiffStats, extractStdoutTail } from '../utils/diff.js';
 import { findFiles, mapConcurrent } from '../utils/fs-helpers.js';
-import { getFileStats, readJsonlFile, scanJsonlHead } from '../utils/jsonl.js';
+import { getFileStats, readJsonlFile, scanJsonlFile, scanJsonlHead } from '../utils/jsonl.js';
 import { generateHandoffMarkdown } from '../utils/markdown.js';
 import { cleanSummary, extractRepo, homeDir } from '../utils/parser-helpers.js';
 import { matchesCwd } from '../utils/slug.js';
@@ -121,12 +122,18 @@ export async function parseCodexSessions(options: SessionParseOptions = {}): Pro
           ? { lines: 0, bytes: fileStats.size }
           : await getFileStats(filePath);
 
+      const payloadRecord = meta?.payload as Record<string, unknown> | undefined;
       const cwd = meta?.payload?.cwd || '';
       if (options.cwd && cwd && !matchesCwd(cwd, options.cwd)) return null;
 
       const gitUrl = meta?.payload?.git?.repository_url;
       const branch = meta?.payload?.git?.branch;
+      const gitSha = meta?.payload?.git?.commit_hash || meta?.payload?.git?.sha;
       const repo = extractRepo({ gitUrl, cwd });
+      const lastTranscriptTimestamp =
+        !options.lightweight && fileStats.size <= MAX_METADATA_SCAN_BYTES
+          ? await extractLastCodexTimestamp(filePath)
+          : undefined;
 
       const summary = cleanSummary(firstUserMessage);
 
@@ -136,10 +143,14 @@ export async function parseCodexSessions(options: SessionParseOptions = {}): Pro
         cwd,
         repo,
         branch,
+        gitSha,
         lines: stats.lines,
         bytes: stats.bytes,
-        createdAt: parsed.timestamp,
-        updatedAt: fileStats.mtime,
+        createdAt:
+          parseValidDate(typeof payloadRecord?.timestamp === 'string' ? payloadRecord.timestamp : undefined) ??
+          parseValidDate(meta?.timestamp) ??
+          parsed.timestamp,
+        updatedAt: lastTranscriptTimestamp ?? fileStats.mtime,
         originalPath: filePath,
         summary: summary || undefined,
       };
@@ -380,20 +391,6 @@ function extractToolData(
           data: { category: 'search', query },
         });
       }
-    } else if (msg.type === 'event_msg') {
-      // Task lifecycle events
-      const payload = msg.payload;
-      if (!payload) continue;
-      if (payload.type === 'task_started') {
-        const desc = truncate(payload.message || '', 60);
-        collector.add('task', `task: started "${desc}"`, {
-          data: { category: 'task', description: desc },
-        });
-      } else if (payload.type === 'task_complete') {
-        collector.add('task', 'task: completed', {
-          data: { category: 'task', description: 'completed' },
-        });
-      }
     }
   }
 
@@ -427,6 +424,27 @@ function extractSessionNotes(messages: CodexMessage[]): SessionNotes {
   };
 
   for (const msg of messages) {
+    if (msg.type === 'session_meta') {
+      const payload = msg.payload as Record<string, unknown> | undefined;
+      const git = payload?.git && typeof payload.git === 'object' ? (payload.git as Record<string, unknown>) : {};
+      notes.sourceMetadata = {
+        ...(notes.sourceMetadata ?? {}),
+        ...(typeof payload?.id === 'string' ? { sessionId: payload.id } : {}),
+        ...(typeof payload?.timestamp === 'string' ? { sessionTimestamp: payload.timestamp } : {}),
+        ...(typeof msg.timestamp === 'string' ? { rolloutTimestamp: msg.timestamp } : {}),
+        ...(typeof payload?.source === 'string' ? { source: payload.source } : {}),
+        ...(typeof payload?.originator === 'string' ? { originator: payload.originator } : {}),
+        ...(typeof payload?.cli_version === 'string' ? { cliVersion: payload.cli_version } : {}),
+        ...(typeof payload?.model_provider === 'string' ? { modelProvider: payload.model_provider } : {}),
+        ...(typeof git.commit_hash === 'string'
+          ? { gitSha: git.commit_hash }
+          : typeof git.sha === 'string'
+            ? { gitSha: git.sha }
+            : {}),
+      };
+      continue;
+    }
+
     // Model from turn_context
     if (msg.type === 'turn_context') {
       if (msg.payload?.model && !notes.model) notes.model = msg.payload.model;
@@ -441,6 +459,22 @@ function extractSessionNotes(messages: CodexMessage[]): SessionNotes {
     if (msg.type !== 'event_msg') continue;
     const payload = msg.payload;
     if (!payload) continue;
+
+    if (
+      payload.type === 'task_started' ||
+      payload.type === 'task_complete' ||
+      payload.type === 'turn_aborted' ||
+      payload.type === 'turn_completed'
+    ) {
+      if (!notes.lifecycle) notes.lifecycle = [];
+      notes.lifecycle.push({
+        type: payload.type,
+        timestamp: msg.timestamp,
+        message: payload.message,
+        metadata: extractCodexLifecycleMetadata(payload),
+      });
+      continue;
+    }
 
     if (payload.type === 'agent_reasoning' && reasoning.length < 5) {
       const text = payload.message || '';
@@ -488,8 +522,29 @@ export async function extractCodexContext(session: UnifiedSession, config?: Verb
   // Collect from both sources separately to avoid duplicates, then merge preferring response_item.
   const eventMsgEntries: ConversationMessage[] = [];
   const responseItemEntries: ConversationMessage[] = [];
+  const lifecycleEvents: SessionEvent[] = [];
+  let lifecycleSequence = 0;
 
   for (const msg of messages) {
+    if (msg.type === 'event_msg' && msg.payload) {
+      const payload = msg.payload;
+      if (
+        payload.type === 'task_started' ||
+        payload.type === 'task_complete' ||
+        payload.type === 'turn_aborted' ||
+        payload.type === 'turn_completed'
+      ) {
+        lifecycleEvents.push({
+          kind: 'lifecycle',
+          sequence: lifecycleSequence++,
+          timestamp: parseValidDate(msg.timestamp),
+          status: payload.type,
+          content: payload.message,
+          metadata: extractCodexLifecycleMetadata(payload),
+        });
+      }
+    }
+
     if (msg.type === 'event_msg') {
       const payload = msg.payload;
       if (payload?.type === 'user_message') {
@@ -563,6 +618,12 @@ export async function extractCodexContext(session: UnifiedSession, config?: Verb
     }
   }
 
+  // Build the timeline from the trimmed message set to reduce the chance that
+  // older user turns are displaced before rendering. The final recent-activity
+  // window is still sliced by event count, so a lifecycle-heavy tail can still
+  // push the last user turn out of view.
+  const timeline = buildCodexTimeline(trimmed, lifecycleEvents);
+
   // Generate markdown for injection
   const markdown = generateHandoffMarkdown(
     session,
@@ -572,6 +633,8 @@ export async function extractCodexContext(session: UnifiedSession, config?: Verb
     toolSummaries,
     sessionNotes,
     resolvedConfig,
+    'inline',
+    timeline,
   );
 
   return {
@@ -581,8 +644,98 @@ export async function extractCodexContext(session: UnifiedSession, config?: Verb
     pendingTasks,
     toolSummaries,
     sessionNotes,
+    timeline,
     markdown,
   };
 }
 
 // generateHandoffMarkdown is imported from ../utils/markdown.js
+
+function parseValidDate(value: string | undefined): Date | undefined {
+  if (!value) return undefined;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+}
+
+async function extractLastCodexTimestamp(filePath: string): Promise<Date | undefined> {
+  let lastTimestamp: Date | undefined;
+  await scanJsonlFile(
+    filePath,
+    (parsed) => {
+      const timestamp = parseValidDate((parsed as { timestamp?: string }).timestamp);
+      if (timestamp) lastTimestamp = timestamp;
+      return 'continue';
+    },
+    { maxBytes: MAX_METADATA_SCAN_BYTES },
+  );
+  return lastTimestamp;
+}
+
+function extractCodexLifecycleMetadata(payload: Record<string, unknown>): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {};
+  for (const key of [
+    'turn_id',
+    'model_context_window',
+    'reason',
+    'collaboration_mode_kind',
+    'started_at',
+    'completed_at',
+    'duration_ms',
+  ]) {
+    const value = payload[key];
+    if (value !== undefined) metadata[key] = value;
+  }
+  return metadata;
+}
+
+function getFiniteTimestampMs(d?: Date): number | undefined {
+  if (!d) return undefined;
+  const ms = d.getTime();
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+const TIMELINE_KIND_ORDER: Record<string, number> = {
+  message: 0,
+  lifecycle: 1,
+  reasoning: 2,
+  tool_call: 3,
+  tool_result: 4,
+  metadata: 5,
+  warning: 6,
+};
+
+function buildCodexTimeline(messages: ConversationMessage[], lifecycleEvents: SessionEvent[]): SessionEvent[] {
+  const messageEvents: SessionEvent[] = messages.map(
+    (message): SessionEvent => ({
+      kind: 'message',
+      sequence: 0, // assigned after merge
+      role: message.role,
+      content: message.content,
+      // Drop non-finite (e.g. Invalid Date) so the comparator stays stable
+      // and downstream toISOString() never throws.
+      ...(getFiniteTimestampMs(message.timestamp) !== undefined ? { timestamp: message.timestamp } : {}),
+    }),
+  );
+  const lifecycleSanitized = lifecycleEvents.map((event) =>
+    getFiniteTimestampMs(event.timestamp) !== undefined ? event : { ...event, timestamp: undefined },
+  );
+
+  const indexed = [...messageEvents, ...lifecycleSanitized].map((event, originalIndex) => ({
+    event,
+    timestampMs: getFiniteTimestampMs(event.timestamp) ?? 0,
+    kindOrder: TIMELINE_KIND_ORDER[event.kind] ?? 99,
+    originalIndex,
+  }));
+
+  indexed.sort((a, b) => {
+    if (a.timestampMs !== b.timestampMs) return a.timestampMs - b.timestampMs;
+    if (a.kindOrder !== b.kindOrder) return a.kindOrder - b.kindOrder;
+    return a.originalIndex - b.originalIndex;
+  });
+
+  // Assign sequence in final chronological order so windowing in markdown.ts is correct.
+  return indexed.map(({ event }, index) => {
+    event.sequence = index;
+    return event;
+  });
+}
