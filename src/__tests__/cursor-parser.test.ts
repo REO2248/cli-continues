@@ -299,4 +299,115 @@ describe('cursor parser hardening', () => {
     expect(context.markdown).not.toContain('system_reminder');
     expect(context.markdown).not.toContain('local agent-transcripts are partial exports');
   });
+
+  it('keeps long transcripts whose first parseable record sits past the head scan window', async () => {
+    const home = makeCursorHome();
+    const sessionId = '44444444-5555-6666-7777-888888888888';
+
+    const rows: unknown[] = [];
+    // 120 prefix records that the normalizer rejects (no role / no content) —
+    // before the gate fix, these would zero out messageCount and drop the
+    // session even though the full-file parse below recovers real messages.
+    for (let i = 0; i < 120; i++) {
+      rows.push({ event: 'noise', i });
+    }
+    rows.push({
+      role: 'user',
+      message: { content: [{ type: 'text', text: 'Real user message after head scan' }] },
+    });
+    rows.push({
+      role: 'assistant',
+      message: { content: [{ type: 'text', text: 'Real assistant reply' }] },
+    });
+
+    const originalPath = writeCursorTranscript(home, 'Users-test-project', sessionId, rows);
+
+    const { parseCursorSessions, extractCursorContext } = await loadCursorParser(home);
+    const sessions = await parseCursorSessions();
+    const session = sessions.find((s) => s.id === sessionId);
+
+    expect(session, 'session past head-scan window must still be discovered').toBeDefined();
+
+    const context = await extractCursorContext({
+      ...(session as UnifiedSession),
+      originalPath,
+    });
+    expect(context.recentMessages.map((m) => m.content)).toEqual([
+      'Real user message after head scan',
+      'Real assistant reply',
+    ]);
+  });
+
+  it('strips every <timestamp> tag, not just the first occurrence', async () => {
+    const home = makeCursorHome();
+    const sessionId = '55555555-6666-7777-8888-999999999999';
+    writeCursorTranscript(home, 'Users-test-project', sessionId, [
+      {
+        role: 'user',
+        message: {
+          content: [
+            {
+              type: 'text',
+              text: '<timestamp>Sunday, Apr 26, 2026, 9:53 PM (UTC-4)</timestamp>\n<user_query>\nFirst question\n</user_query>',
+            },
+          ],
+        },
+      },
+      {
+        role: 'assistant',
+        message: {
+          content: [
+            {
+              type: 'text',
+              text: '<timestamp>Sunday, Apr 26, 2026, 9:54 PM (UTC-4)</timestamp> some answer <timestamp>Sunday, Apr 26, 2026, 9:55 PM (UTC-4)</timestamp> more answer',
+            },
+          ],
+        },
+      },
+    ]);
+
+    const { extractCursorContext, parseCursorSessions } = await loadCursorParser(home);
+    const [session] = await parseCursorSessions();
+    const context = await extractCursorContext(session);
+
+    const assistantMessage = context.recentMessages.find((m) => m.role === 'assistant');
+    expect(assistantMessage?.content).not.toContain('<timestamp>');
+    expect(assistantMessage?.content).not.toContain('</timestamp>');
+    expect(assistantMessage?.content).toContain('some answer');
+    expect(assistantMessage?.content).toContain('more answer');
+  });
+
+  it('deduplicates sessions when both <uuid>/transcript.jsonl and <uuid>.jsonl exist for the same id', async () => {
+    const home = makeCursorHome();
+    const sharedId = '66666666-7777-8888-9999-aaaaaaaaaaaa';
+    const slug = 'Users-test-project';
+
+    // Nested transcript.jsonl
+    const nestedDir = path.join(home, '.cursor', 'projects', slug, 'agent-transcripts', sharedId);
+    fs.mkdirSync(nestedDir, { recursive: true });
+    const nestedPath = path.join(nestedDir, 'transcript.jsonl');
+    fs.writeFileSync(
+      nestedPath,
+      `${JSON.stringify({ role: 'user', message: { content: [{ type: 'text', text: 'older copy' }] } })}\n`,
+      'utf8',
+    );
+
+    // Sibling <uuid>/<uuid>.jsonl in the same dir (legacy lingering file)
+    const siblingPath = path.join(nestedDir, `${sharedId}.jsonl`);
+    fs.writeFileSync(
+      siblingPath,
+      `${JSON.stringify({ role: 'user', message: { content: [{ type: 'text', text: 'newer copy' }] } })}\n`,
+      'utf8',
+    );
+
+    fs.utimesSync(nestedPath, new Date('2026-04-15T10:00:00.000Z'), new Date('2026-04-15T10:00:00.000Z'));
+    fs.utimesSync(siblingPath, new Date('2026-04-15T11:00:00.000Z'), new Date('2026-04-15T11:00:00.000Z'));
+
+    const { parseCursorSessions } = await loadCursorParser(home);
+    const sessions = await parseCursorSessions();
+    const matching = sessions.filter((s) => s.id === sharedId);
+
+    expect(matching).toHaveLength(1);
+    expect(matching[0].updatedAt.toISOString()).toBe('2026-04-15T11:00:00.000Z');
+  });
 });

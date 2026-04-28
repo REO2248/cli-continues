@@ -21,6 +21,7 @@ const CURSOR_PROJECTS_DIR = path.join(homeDir(), '.cursor', 'projects');
 const CURSOR_FIDELITY_WARNING =
   'Cursor transcript completeness warning: local agent-transcripts are partial exports and may omit tool outputs, images, reasoning, compaction markers, or other hidden SQLite/session state.';
 const CURSOR_TIMESTAMP_TAG_RE = /<timestamp>([\s\S]*?)<\/timestamp>/i;
+const CURSOR_TIMESTAMP_TAG_GLOBAL_RE = /<timestamp>[\s\S]*?<\/timestamp>/gi;
 const CURSOR_TIMESTAMP_BODY_RE =
   /(?:[A-Za-z]+,\s*)?([A-Za-z]+)\s+(\d{1,2}),\s+(\d{4}),\s+(\d{1,2}):(\d{2})\s+([AP]M)\s*(?:\(UTC([+-])(\d{1,2})(?::?(\d{2}))?\))?/i;
 
@@ -60,8 +61,14 @@ function getNumberField(record: Record<string, unknown> | undefined, key: string
 function normalizeContentBlock(value: unknown): CursorContentBlock | null {
   if (!isRecord(value) || typeof value.type !== 'string') return null;
 
+  // Spread the raw fields, then sanitize `text` so a non-string upstream value
+  // can never reach downstream consumers (which assume `block.text: string`).
   const block: CursorContentBlock = { ...value, type: value.type };
-  if (typeof value.text === 'string') block.text = value.text;
+  if (typeof value.text === 'string') {
+    block.text = value.text;
+  } else if ('text' in block) {
+    delete block.text;
+  }
   return block;
 }
 
@@ -99,7 +106,7 @@ function normalizeCursorLine(record: unknown): NormalizedCursorLine | null {
 }
 
 function stripCursorMetadataTags(text: string): string {
-  return text.replace(CURSOR_TIMESTAMP_TAG_RE, '').trim();
+  return text.replace(CURSOR_TIMESTAMP_TAG_GLOBAL_RE, '').trim();
 }
 
 function cleanCursorUserText(text: string): string {
@@ -200,7 +207,15 @@ async function readNormalizedTranscript(filePath: string): Promise<NormalizedCur
 
 /**
  * Find all Cursor agent-transcript JSONL files.
- * Structure: ~/.cursor/projects/<project-slug>/agent-transcripts/<uuid>/<uuid>.jsonl
+ *
+ * Cursor writes transcripts under `~/.cursor/projects/<project-slug>/agent-transcripts/`
+ * in two observed layouts:
+ *   - nested: `<uuid>/transcript.jsonl` (or `<uuid>/<uuid>.jsonl`)
+ *   - flat:   `<uuid>.jsonl`
+ *
+ * The recursive scan accepts both. Discovery does not assume a particular
+ * filename — `getSessionId()` derives the UUID, and `parseCursorSessions()`
+ * deduplicates by id when both layouts coexist for the same session.
  */
 async function findTranscriptFiles(): Promise<string[]> {
   if (!fs.existsSync(CURSOR_PROJECTS_DIR)) return [];
@@ -254,26 +269,45 @@ function getSessionId(filePath: string): string {
   return stem;
 }
 
-async function resolveProjectCwd(projectDir: string, slug: string): Promise<string> {
+async function resolveProjectCwd(
+  projectDir: string,
+  slug: string,
+  cache: Map<string, string>,
+): Promise<string> {
   const fallback = cwdFromSlug(slug);
   if (!projectDir) return fallback;
 
-  const repoJsonPath = path.join(projectDir, 'repo.json');
-  if (!fs.existsSync(repoJsonPath)) return fallback;
+  // Cache the resolved cwd per project directory: a single `repo.json` is
+  // shared by every transcript in a project, and discovery typically iterates
+  // many sibling sessions in the same project.
+  const cached = cache.get(projectDir);
+  if (cached !== undefined) return cached || fallback;
 
+  const repoJsonPath = path.join(projectDir, 'repo.json');
+  if (!fs.existsSync(repoJsonPath)) {
+    cache.set(projectDir, '');
+    return fallback;
+  }
+
+  let resolved = '';
   try {
     const content = await fs.promises.readFile(repoJsonPath, 'utf8');
     const parsed = JSON.parse(content) as unknown;
-    if (!isRecord(parsed)) return fallback;
-    for (const key of ['workspace', 'rootPath', 'path']) {
-      const value = getStringField(parsed, key);
-      if (value) return value;
+    if (isRecord(parsed)) {
+      for (const key of ['workspace', 'rootPath', 'path']) {
+        const value = getStringField(parsed, key);
+        if (value) {
+          resolved = value;
+          break;
+        }
+      }
     }
   } catch (err) {
     logger.debug('cursor: failed to read project metadata', repoJsonPath, err);
   }
 
-  return fallback;
+  cache.set(projectDir, resolved);
+  return resolved || fallback;
 }
 
 /**
@@ -284,13 +318,11 @@ async function parseSessionInfo(filePath: string): Promise<{
   firstTimestamp?: Date;
   lineCount: number;
   bytes: number;
-  messageCount: number;
   model?: string;
 }> {
   let firstUserMessage = '';
   let firstTimestamp: Date | undefined;
   let model: string | undefined;
-  let messageCount = 0;
 
   // Stream-count lines without full JSON parse (fast)
   const stats = await getFileStats(filePath);
@@ -299,8 +331,6 @@ async function parseSessionInfo(filePath: string): Promise<{
   await scanJsonlHead(filePath, 100, (parsed) => {
     const line = normalizeCursorLine(parsed);
     if (!line) return 'continue';
-
-    messageCount++;
 
     const timestamp = extractLineTimestamp(line);
     if (timestamp) {
@@ -328,7 +358,6 @@ async function parseSessionInfo(filePath: string): Promise<{
     firstTimestamp,
     lineCount: stats.lines,
     bytes: stats.bytes,
-    messageCount,
     model,
   };
 }
@@ -338,21 +367,25 @@ async function parseSessionInfo(filePath: string): Promise<{
  */
 export async function parseCursorSessions(): Promise<UnifiedSession[]> {
   const files = await findTranscriptFiles();
-  const sessions: UnifiedSession[] = [];
+  const sessionsById = new Map<string, UnifiedSession>();
+  const projectCwdCache = new Map<string, string>();
 
   for (const filePath of files) {
     try {
-      const { firstUserMessage, firstTimestamp, lineCount, bytes, messageCount, model } =
-        await parseSessionInfo(filePath);
-      if (messageCount === 0) continue;
+      const { firstUserMessage, firstTimestamp, lineCount, bytes, model } = await parseSessionInfo(filePath);
+      // Do not gate on head-scan `messageCount`: a long session whose first
+      // valid record sits past the 100-line head would be dropped here even
+      // though `extractCursorContext()` reads the full file. The downstream
+      // `lines > 0 && bytes > 0` filter still excludes truly empty files.
       const fileStats = fs.statSync(filePath);
       const slug = getProjectSlug(filePath);
-      const cwd = await resolveProjectCwd(getProjectDir(filePath), slug);
+      const cwd = await resolveProjectCwd(getProjectDir(filePath), slug, projectCwdCache);
 
       const summary = cleanSummary(firstUserMessage);
 
-      sessions.push({
-        id: getSessionId(filePath),
+      const id = getSessionId(filePath);
+      const next: UnifiedSession = {
+        id,
         source: 'cursor',
         cwd,
         repo: extractRepoFromCwd(cwd),
@@ -363,14 +396,23 @@ export async function parseCursorSessions(): Promise<UnifiedSession[]> {
         originalPath: filePath,
         summary: summary || undefined,
         model,
-      });
+      };
+
+      // Discovery may surface the same logical session twice when a session
+      // dir contains both `<uuid>/transcript.jsonl` and `<uuid>.jsonl` (or a
+      // legacy `<uuid>/<uuid>.jsonl` left behind). Keep the most recently
+      // updated copy so the picker shows the canonical entry.
+      const existing = sessionsById.get(id);
+      if (!existing || existing.updatedAt.getTime() < next.updatedAt.getTime()) {
+        sessionsById.set(id, next);
+      }
     } catch (err) {
       logger.debug('cursor: skipping unparseable session', filePath, err);
       // Skip files we can't parse
     }
   }
 
-  return sessions
+  return Array.from(sessionsById.values())
     .filter((s) => s.bytes > 0 && s.lines > 0)
     .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
 }
