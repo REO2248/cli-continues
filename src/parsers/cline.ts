@@ -490,6 +490,112 @@ function orderBy(columns: Set<string>, preferred: string, fallback: string): str
   return 'rowid ASC';
 }
 
+interface KiloDbDiscoverySummary {
+  rowCount: number;
+  firstUserMessage: string;
+  model?: string;
+  firstTimestamp?: Date;
+  lastTimestamp?: Date;
+}
+
+/**
+ * Lightweight summary used during session discovery.
+ *
+ * Issues a single message query (no parts) to determine row count and
+ * timestamps, then makes at most two follow-up part queries to recover
+ * the first-user content (for summary fallback) and model (for the
+ * unified session card). Avoids the N+1 message/part scan that the
+ * full extraction path requires, so listing remains fast on large DBs.
+ */
+function readKiloDbDiscoverySummary(
+  db: SqliteDatabase,
+  schema: KiloDbSchema,
+  sessionId: string,
+): KiloDbDiscoverySummary {
+  const messageColumns = selectColumns(schema.message, ['id', 'time_created', 'data']);
+  let msgRows: unknown[];
+  try {
+    msgRows = db
+      .prepare(
+        `SELECT ${messageColumns} FROM message WHERE session_id = ? ORDER BY ${orderBy(schema.message, 'time_created', 'id')}`,
+      )
+      .all(sessionId);
+  } catch (err) {
+    logger.debug('kilo-code: failed to read message metadata for discovery', sessionId, err);
+    return { rowCount: 0, firstUserMessage: '' };
+  }
+
+  let firstTimestamp: Date | undefined;
+  let lastTimestamp: Date | undefined;
+  let firstUserMessageId: string | undefined;
+  let firstAssistantMessageId: string | undefined;
+  let model: string | undefined;
+
+  for (const msgRow of msgRows) {
+    if (!isRecord(msgRow)) continue;
+    const messageId = readString(msgRow, 'id');
+    if (!messageId) continue;
+
+    const messageData = parseJsonRecord(msgRow.data, `message:${messageId}`);
+    if (!messageData) continue;
+
+    const role = roleFromMessageData(messageData);
+    if (!role) continue;
+
+    const timestamp = timestampFromValue(msgRow.time_created);
+    if (timestamp) {
+      if (!firstTimestamp || timestamp.getTime() < firstTimestamp.getTime()) firstTimestamp = timestamp;
+      if (!lastTimestamp || timestamp.getTime() > lastTimestamp.getTime()) lastTimestamp = timestamp;
+    }
+
+    if (role === 'user' && !firstUserMessageId) firstUserMessageId = messageId;
+    if (role === 'assistant' && !firstAssistantMessageId) {
+      firstAssistantMessageId = messageId;
+      if (!model) {
+        model = firstString(messageData, ['modelID', 'modelId', 'model', 'providerID', 'providerId']);
+      }
+    }
+
+    if (firstUserMessageId && firstAssistantMessageId && model) break;
+  }
+
+  const firstUserMessage = firstUserMessageId ? readKiloDbPartsContent(db, schema, firstUserMessageId) : '';
+
+  return {
+    rowCount: msgRows.length,
+    firstUserMessage,
+    model,
+    firstTimestamp,
+    lastTimestamp,
+  };
+}
+
+/** Read and concatenate the text content of all parts for a single message. */
+function readKiloDbPartsContent(db: SqliteDatabase, schema: KiloDbSchema, messageId: string): string {
+  const partColumns = selectColumns(schema.part, ['id', 'message_id', 'time_created', 'data']);
+  let partRows: unknown[];
+  try {
+    partRows = db
+      .prepare(
+        `SELECT ${partColumns} FROM part WHERE message_id = ? ORDER BY ${orderBy(schema.part, 'time_created', 'id')}`,
+      )
+      .all(messageId);
+  } catch (err) {
+    logger.debug('kilo-code: failed to read part rows', messageId, err);
+    return '';
+  }
+
+  const contentParts: string[] = [];
+  for (const partRow of partRows) {
+    if (!isRecord(partRow)) continue;
+    const partData = parseJsonRecord(partRow.data, `part:${messageId}`);
+    if (!partData) continue;
+    const content = extractKiloPartContent(partData).trim();
+    if (content) contentParts.push(content);
+  }
+  return contentParts.join('\n').trim();
+}
+
 function readKiloDbMessagesFromHandle(
   db: SqliteDatabase,
   schema: KiloDbSchema,
@@ -699,56 +805,130 @@ function buildConversation(messages: ClineRawMessage[]): ConversationMessage[] {
 
 // ── Token / Cost Extraction ─────────────────────────────────────────────────
 
+interface TokenAccumulator {
+  tokensIn: number;
+  tokensOut: number;
+  cacheWrites: number;
+  cacheReads: number;
+  found: boolean;
+}
+
 /**
- * Aggregate token usage and cost from api_req_started events.
- * Each event's text field contains a JSON object with token counts.
+ * Sum per-call token counts from `api_req_started` events.
+ * Each event's `text` payload describes a single API call.
  */
-function extractTokenUsage(messages: ClineRawMessage[]): SessionNotes {
-  const notes: SessionNotes = {};
-  let totalIn = 0;
-  let totalOut = 0;
-  let totalCacheWrites = 0;
-  let totalCacheReads = 0;
-  let found = false;
+function sumStartedTokens(messages: ClineRawMessage[]): TokenAccumulator {
+  const acc: TokenAccumulator = {
+    tokensIn: 0,
+    tokensOut: 0,
+    cacheWrites: 0,
+    cacheReads: 0,
+    found: false,
+  };
 
   for (const msg of messages) {
-    if (msg.type !== 'say' || (msg.say !== 'api_req_started' && msg.say !== 'api_req_finished')) continue;
-    if (!msg.text) continue;
-
+    if (msg.type !== 'say' || msg.say !== 'api_req_started' || !msg.text) continue;
     try {
       const parsed: unknown = JSON.parse(msg.text);
       if (!isRecord(parsed)) continue;
-
-      const tokensIn = readNumber(parsed, 'tokensIn') ?? readNumber(parsed, 'totalTokensIn');
+      const tokensIn = readNumber(parsed, 'tokensIn');
       if (tokensIn !== undefined) {
-        totalIn += tokensIn;
-        found = true;
+        acc.tokensIn += tokensIn;
+        acc.found = true;
       }
-      const tokensOut = readNumber(parsed, 'tokensOut') ?? readNumber(parsed, 'totalTokensOut');
+      const tokensOut = readNumber(parsed, 'tokensOut');
       if (tokensOut !== undefined) {
-        totalOut += tokensOut;
-        found = true;
+        acc.tokensOut += tokensOut;
+        acc.found = true;
       }
-      const cacheWrites = readNumber(parsed, 'cacheWrites') ?? readNumber(parsed, 'totalCacheWrites');
+      const cacheWrites = readNumber(parsed, 'cacheWrites');
       if (cacheWrites !== undefined) {
-        totalCacheWrites += cacheWrites;
-        found = true;
+        acc.cacheWrites += cacheWrites;
+        acc.found = true;
       }
-      const cacheReads = readNumber(parsed, 'cacheReads') ?? readNumber(parsed, 'totalCacheReads');
+      const cacheReads = readNumber(parsed, 'cacheReads');
       if (cacheReads !== undefined) {
-        totalCacheReads += cacheReads;
-        found = true;
+        acc.cacheReads += cacheReads;
+        acc.found = true;
       }
     } catch (err) {
-      logger.debug('cline: skipping malformed API request metadata', err);
+      logger.debug('cline: skipping malformed api_req_started metadata', err);
     }
   }
 
-  if (found) {
-    notes.tokenUsage = { input: totalIn, output: totalOut };
+  return acc;
+}
+
+/**
+ * Read cumulative session totals from the last `api_req_finished` event.
+ * `api_req_finished.total*` fields already include all per-call counts, so
+ * this is used only as a fallback when no `api_req_started` data is present.
+ */
+function readLastFinishedTotals(messages: ClineRawMessage[]): TokenAccumulator {
+  const acc: TokenAccumulator = {
+    tokensIn: 0,
+    tokensOut: 0,
+    cacheWrites: 0,
+    cacheReads: 0,
+    found: false,
+  };
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.type !== 'say' || msg.say !== 'api_req_finished' || !msg.text) continue;
+    try {
+      const parsed: unknown = JSON.parse(msg.text);
+      if (!isRecord(parsed)) continue;
+      const tokensIn = readNumber(parsed, 'totalTokensIn') ?? readNumber(parsed, 'tokensIn');
+      const tokensOut = readNumber(parsed, 'totalTokensOut') ?? readNumber(parsed, 'tokensOut');
+      const cacheWrites = readNumber(parsed, 'totalCacheWrites') ?? readNumber(parsed, 'cacheWrites');
+      const cacheReads = readNumber(parsed, 'totalCacheReads') ?? readNumber(parsed, 'cacheReads');
+      if (tokensIn !== undefined) {
+        acc.tokensIn = tokensIn;
+        acc.found = true;
+      }
+      if (tokensOut !== undefined) {
+        acc.tokensOut = tokensOut;
+        acc.found = true;
+      }
+      if (cacheWrites !== undefined) {
+        acc.cacheWrites = cacheWrites;
+        acc.found = true;
+      }
+      if (cacheReads !== undefined) {
+        acc.cacheReads = cacheReads;
+        acc.found = true;
+      }
+      if (acc.found) return acc;
+    } catch (err) {
+      logger.debug('cline: skipping malformed api_req_finished metadata', err);
+    }
   }
-  if (totalCacheWrites > 0 || totalCacheReads > 0) {
-    notes.cacheTokens = { creation: totalCacheWrites, read: totalCacheReads };
+
+  return acc;
+}
+
+/**
+ * Aggregate token usage from API request events.
+ *
+ * Cline emits two flavors of API event:
+ *  - `api_req_started`: per-call counts (`tokensIn`, `tokensOut`, ...)
+ *  - `api_req_finished`: cumulative session totals (`totalTokensIn`, ...)
+ *
+ * Summing both double-counts every call. We prefer the per-call data when
+ * present and only fall back to the last `api_req_finished` totals when no
+ * `api_req_started` events were found.
+ */
+function extractTokenUsage(messages: ClineRawMessage[]): SessionNotes {
+  const notes: SessionNotes = {};
+  const started = sumStartedTokens(messages);
+  const totals = started.found ? started : readLastFinishedTotals(messages);
+
+  if (totals.found) {
+    notes.tokenUsage = { input: totals.tokensIn, output: totals.tokensOut };
+  }
+  if (totals.cacheWrites > 0 || totals.cacheReads > 0) {
+    notes.cacheTokens = { creation: totals.cacheWrites, read: totals.cacheReads };
   }
 
   return notes;
@@ -888,33 +1068,35 @@ async function parseKiloDbSessions(): Promise<UnifiedSession[]> {
         const id = readString(row, 'id');
         if (!id) continue;
 
-        const messageRead = readKiloDbMessagesFromHandle(db, schema, id, 0);
-        if (messageRead.rowCount === 0) continue;
+        // Discovery uses a lightweight summary (one message-table query + at
+        // most one part query for the first user message) instead of walking
+        // every message and part for every session.
+        const summaryRead = readKiloDbDiscoverySummary(db, schema, id);
+        if (summaryRead.rowCount === 0) continue;
 
-        const firstUserMessage = messageRead.messages.find((message) => message.role === 'user')?.content ?? '';
         const title = readString(row, 'title') ?? '';
         const slug = readString(row, 'slug') ?? '';
-        const summarySource = isUnhelpfulDbTitle(title) ? firstUserMessage || slug : title;
-        const summary = cleanSummary(summarySource || slug || firstUserMessage);
+        const summarySource = isUnhelpfulDbTitle(title) ? summaryRead.firstUserMessage || slug : title;
+        const summary = cleanSummary(summarySource || slug || summaryRead.firstUserMessage);
         if (!summary) continue;
 
         const projectId = readString(row, 'project_id');
         const cwd = readString(row, 'directory') || getProjectWorktree(db, schema, projectId);
-        const createdAt = timestampFromValue(row.time_created) ?? messageRead.firstTimestamp ?? dbStats.birthtime;
-        const updatedAt = timestampFromValue(row.time_updated) ?? messageRead.lastTimestamp ?? dbStats.mtime;
+        const createdAt = timestampFromValue(row.time_created) ?? summaryRead.firstTimestamp ?? dbStats.birthtime;
+        const updatedAt = timestampFromValue(row.time_updated) ?? summaryRead.lastTimestamp ?? dbStats.mtime;
 
         const session: UnifiedSession = {
           id,
           source: 'kilo-code',
           cwd,
           repo: extractRepoFromCwd(cwd),
-          lines: messageRead.rowCount,
+          lines: summaryRead.rowCount,
           bytes: dbStats.size,
           createdAt,
           updatedAt,
           originalPath: dbPath,
           summary,
-          model: messageRead.notes.model,
+          model: summaryRead.model,
         };
 
         const existing = sessionsById.get(id);

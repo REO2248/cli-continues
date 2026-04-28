@@ -398,6 +398,12 @@ describe('Cline-family parser hardening', () => {
       },
       { ts: 1770000203000, type: 'say', say: 'text', text: 'Draft assistant answer', partial: true },
       { ts: 1770000204000, type: 'say', say: 'text', text: 'Final assistant answer', partial: false },
+      {
+        ts: 1770000204500,
+        type: 'say',
+        say: 'api_req_started',
+        text: '{"tokensIn":7,"tokensOut":8,"cacheWrites":1,"cacheReads":4,"cost":0.02}',
+      },
       { ts: 1770000205000, type: 'ask', ask: 'followup', text: 'Should I add parser tests?' },
       { ts: 1770000206000, type: 'say', say: 'user_feedback', text: 'Yes, add parser tests' },
       {
@@ -407,10 +413,13 @@ describe('Cline-family parser hardening', () => {
         reasoning: 'Need to cover malformed messages, streaming finalization, and all source variants.',
       },
       {
+        // Cumulative totals from api_req_finished must NOT be added on top of
+        // the per-call api_req_started events above (real Cline data has these
+        // totals already include the per-call counts).
         ts: 1770000208000,
         type: 'say',
         say: 'api_req_finished',
-        text: '{"totalTokensIn":7,"totalTokensOut":8,"totalCacheWrites":1,"totalCacheReads":4,"totalCost":0.02}',
+        text: '{"totalTokensIn":17,"totalTokensOut":8,"totalCacheWrites":3,"totalCacheReads":7,"totalCost":0.03}',
       },
       {
         ts: 1770000209000,
@@ -463,6 +472,58 @@ describe('Cline-family parser hardening', () => {
       expect(context.filesModified).toEqual([]);
       expect(context.toolSummaries).toEqual([]);
     }
+  });
+
+  it('falls back to api_req_finished totals only when no api_req_started events are present', async () => {
+    const home = makeHome();
+    const messages = [
+      { ts: 1770000300000, type: 'say', say: 'task', text: 'Token fallback session' },
+      {
+        // No api_req_started events at all — extractTokenUsage must read the
+        // last api_req_finished cumulative totals instead of returning empty.
+        ts: 1770000301000,
+        type: 'say',
+        say: 'api_req_finished',
+        text: '{"totalTokensIn":42,"totalTokensOut":13,"totalCacheWrites":5,"totalCacheReads":9}',
+      },
+      { ts: 1770000302000, type: 'say', say: 'completion_result', text: 'Done.' },
+    ];
+    const originalPath = writeTask(home, 'saoudrizwan.claude-dev', 'fallback-token-task', messages);
+
+    const { extractClineContext } = await loadClineParser(home);
+    const context = await extractClineContext(sessionFor('cline', originalPath));
+
+    expect(context.sessionNotes?.tokenUsage).toEqual({ input: 42, output: 13 });
+    expect(context.sessionNotes?.cacheTokens).toEqual({ creation: 5, read: 9 });
+  });
+
+  it('does not double-count tokens when both api_req_started and api_req_finished are present', async () => {
+    const home = makeHome();
+    const messages = [
+      { ts: 1770000400000, type: 'say', say: 'task', text: 'Realistic token session' },
+      {
+        // Per-call counts from a single API call.
+        ts: 1770000401000,
+        type: 'say',
+        say: 'api_req_started',
+        text: '{"tokensIn":50,"tokensOut":20,"cacheWrites":4,"cacheReads":6}',
+      },
+      {
+        // Cumulative session totals — match the per-call sum exactly, mirroring
+        // how Cline writes these in real captures.
+        ts: 1770000402000,
+        type: 'say',
+        say: 'api_req_finished',
+        text: '{"totalTokensIn":50,"totalTokensOut":20,"totalCacheWrites":4,"totalCacheReads":6}',
+      },
+    ];
+    const originalPath = writeTask(home, 'saoudrizwan.claude-dev', 'no-double-count-task', messages);
+
+    const { extractClineContext } = await loadClineParser(home);
+    const context = await extractClineContext(sessionFor('cline', originalPath));
+
+    expect(context.sessionNotes?.tokenUsage).toEqual({ input: 50, output: 20 });
+    expect(context.sessionNotes?.cacheTokens).toEqual({ creation: 4, read: 6 });
   });
 
   it('returns empty context instead of throwing for invalid or non-array ui_messages.json files', async () => {
