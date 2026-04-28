@@ -19,16 +19,27 @@ import { readJsonlFile } from '../utils/jsonl.js';
 
 // ── Format Detection ────────────────────────────────────────────────────────
 
-type SessionFormat = 'jsonl' | 'json' | 'sqlite' | 'yaml';
+type SessionFormat = 'jsonl' | 'json' | 'sqlite' | 'yaml' | 'binary';
 
-function getSessionFormat(source: string): SessionFormat {
+function getSessionFormat(source: string, session?: UnifiedSession): SessionFormat {
   switch (source) {
     case 'claude':
     case 'codex':
     case 'droid':
     case 'cursor':
-    case 'antigravity':
       return 'jsonl';
+    case 'antigravity': {
+      // Antigravity normally stores sessions as protobuf-backed binary
+      // artifacts, but the parser still discovers legacy JSON/JSONL files
+      // (id prefixed `legacy:`). Detect from the file extension so `inspect`
+      // can read raw events for those sessions instead of always reporting
+      // raw analysis as unavailable.
+      if (session && session.id.startsWith('legacy:')) {
+        if (session.originalPath.endsWith('.jsonl')) return 'jsonl';
+        if (session.originalPath.endsWith('.json')) return 'json';
+      }
+      return 'binary';
+    }
     case 'gemini':
     case 'amp':
     case 'kiro':
@@ -634,7 +645,7 @@ export async function inspectSession(
   }
 
   // 2. Read raw events (format-aware)
-  const format = getSessionFormat(session.source);
+  const format = getSessionFormat(session.source, session);
   let rawMessages: Array<Record<string, unknown>> = [];
   let rawEventNote = '';
 
@@ -652,6 +663,8 @@ export async function inspectSession(
     rawEventNote = '(raw event analysis not available for SQLite sessions)';
   } else if (format === 'yaml') {
     rawEventNote = '(raw event analysis not available for YAML sessions)';
+  } else if (format === 'binary') {
+    rawEventNote = '(raw event analysis not available for binary/artifact-backed sessions)';
   }
 
   const { events, blocks, tools, model } = analyzeRawMessages(rawMessages);
@@ -659,7 +672,8 @@ export async function inspectSession(
   // 3. File stats
   const mainFileStats = fs.statSync(session.originalPath);
   const mainSize = mainFileStats.size;
-  const mainLines = format === 'jsonl' ? rawMessages.length : countLines(session.originalPath);
+  const mainLines =
+    format === 'jsonl' ? rawMessages.length : format === 'binary' ? session.lines : countLines(session.originalPath);
 
   // 4. Subagent & tool-result files (Claude-specific)
   const sessionDir = session.originalPath.replace(/\.jsonl$/, '');
