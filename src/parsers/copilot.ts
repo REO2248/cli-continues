@@ -7,6 +7,7 @@ import { logger } from '../logger.js';
 import type {
   ConversationMessage,
   SessionContext,
+  SessionEvent,
   StructuredToolSample,
   ToolUsageSummary,
   UnifiedSession,
@@ -14,7 +15,7 @@ import type {
 import type { CopilotEvent, CopilotWorkspace } from '../types/schemas.js';
 import { classifyToolName } from '../types/tool-names.js';
 import { listSubdirectories } from '../utils/fs-helpers.js';
-import { getFileStats, readJsonlFile, scanJsonlHead } from '../utils/jsonl.js';
+import { getFileStats, readJsonlFile, scanJsonlFile } from '../utils/jsonl.js';
 import { generateHandoffMarkdown } from '../utils/markdown.js';
 import { homeDir, trimMessages } from '../utils/parser-helpers.js';
 import {
@@ -72,21 +73,35 @@ function parseWorkspace(workspacePath: string): CopilotWorkspace | null {
 }
 
 /**
- * Extract model from events.jsonl
+ * Extract model from events.jsonl.
+ *
+ * `selectedModel` is set on session.start (early in the file); `currentModel` is also
+ * written on session.shutdown events at the END of the file. Real Copilot sessions where
+ * the model field doesn't appear in the first 50 lines were missing it entirely. Scan up
+ * to 1 MiB and prefer selectedModel (early return on first match), falling back to the
+ * latest currentModel observed during the bounded scan.
  */
 async function extractModel(eventsPath: string): Promise<string | undefined> {
-  let model: string | undefined;
+  let selected: string | undefined;
+  let latestCurrent: string | undefined;
 
-  await scanJsonlHead(eventsPath, 50, (parsed) => {
-    const event = parsed as CopilotEvent;
-    if (event.type === 'session.start' && event.data?.selectedModel) {
-      model = event.data.selectedModel;
-      return 'stop';
-    }
-    return 'continue';
-  });
+  await scanJsonlFile(
+    eventsPath,
+    (parsed) => {
+      const event = parsed as CopilotEvent;
+      if (event.data?.selectedModel) {
+        selected = event.data.selectedModel;
+        return 'stop';
+      }
+      if (event.data?.currentModel) {
+        latestCurrent = event.data.currentModel;
+      }
+      return 'continue';
+    },
+    { maxBytes: 1024 * 1024 },
+  );
 
-  return model;
+  return selected ?? latestCurrent;
 }
 
 /**
@@ -104,8 +119,10 @@ export async function parseCopilotSessions(): Promise<UnifiedSession[]> {
       const workspace = parseWorkspace(workspacePath);
       if (!workspace) continue;
 
-      const stats = fs.existsSync(eventsPath) ? await getFileStats(eventsPath) : { lines: 0, bytes: 0 };
-      const model = await extractModel(eventsPath);
+      const eventsExist = fs.existsSync(eventsPath);
+      const stats = eventsExist ? await getFileStats(eventsPath) : { lines: 0, bytes: 0 };
+      const model = eventsExist ? await extractModel(eventsPath) : undefined;
+      const lastEventTimestamp = eventsExist ? await extractLastEventTimestamp(eventsPath, stats.bytes) : undefined;
 
       let summary = workspace.summary || '';
       if (summary.startsWith('|')) {
@@ -121,7 +138,7 @@ export async function parseCopilotSessions(): Promise<UnifiedSession[]> {
         lines: stats.lines,
         bytes: stats.bytes,
         createdAt: new Date(workspace.created_at),
-        updatedAt: new Date(workspace.updated_at),
+        updatedAt: lastEventTimestamp ?? new Date(workspace.updated_at),
         originalPath: sessionDir,
         summary: summary.slice(0, 60),
         model,
@@ -149,7 +166,10 @@ export async function extractCopilotContext(
   const recentMessages: ConversationMessage[] = [];
   const pendingTasks: string[] = [];
 
-  // Process all events before trimming; Copilot tails often contain only tool execution events.
+  // First pass: collect messages only, so trimMessages can run before timeline construction.
+  // Tool-heavy assistant turns produce many tool_call/tool_result events that, if added to the
+  // timeline alongside untrimmed messages, get evicted by renderer's slice(-timelineWindow).
+  // Copilot tails often contain only tool execution events.
   for (const event of events) {
     if (event.type === 'user.message') {
       const content = event.data?.content || event.data?.transformedContent || '';
@@ -158,19 +178,26 @@ export async function extractCopilotContext(
           role: 'user',
           content,
           timestamp: new Date(event.timestamp),
+          sourceId: event.id,
+          sourceParentId: event.parentId ?? undefined,
         });
       }
     } else if (event.type === 'assistant.message') {
       const content = event.data?.content || '';
       const toolRequests = event.data?.toolRequests || [];
+      const toolCalls =
+        toolRequests.length > 0
+          ? toolRequests.map((t) => ({ name: t.name, arguments: getCopilotToolArguments(t) }))
+          : undefined;
 
       if (content) {
         recentMessages.push({
           role: 'assistant',
           content: typeof content === 'string' ? content : JSON.stringify(content),
           timestamp: new Date(event.timestamp),
-          toolCalls:
-            toolRequests.length > 0 ? toolRequests.map((t) => ({ name: t.name, arguments: t.arguments })) : undefined,
+          sourceId: event.id,
+          sourceParentId: event.parentId ?? undefined,
+          toolCalls,
         });
       } else if (toolRequests.length > 0) {
         // Assistant message with only tool calls (no text content)
@@ -179,7 +206,9 @@ export async function extractCopilotContext(
           role: 'assistant',
           content: `[Used tools: ${toolNames}]`,
           timestamp: new Date(event.timestamp),
-          toolCalls: toolRequests.map((t) => ({ name: t.name, arguments: t.arguments })),
+          sourceId: event.id,
+          sourceParentId: event.parentId ?? undefined,
+          toolCalls,
         });
       }
     }
@@ -204,6 +233,121 @@ export async function extractCopilotContext(
 
   const trimmed = trimMessages(recentMessages, resolvedConfig.recentMessages);
 
+  // Build timeline from trimmed messages so the user-retention guarantee survives the
+  // renderer's slice(-timelineWindow). Tool events are anchored to retained messages by
+  // parent id (not by time window) so the timeline composes with the trimmed message set:
+  // tool.execution_start.parentId points to its assistant (or user) message, and
+  // tool.execution_complete.parentId points to its tool.execution_start event.
+  const trimmedIds = new Set<string>(
+    trimmed.map((m) => m.sourceId).filter((id): id is string => typeof id === 'string'),
+  );
+  // Map tool.execution_start id → toolName so the matching tool.execution_complete
+  // event can carry the correct toolName (the complete event payload doesn't repeat it).
+  const emittedStartToolNames = new Map<string, string>();
+  const timeline: SessionEvent[] = [];
+  let sequence = 0;
+
+  for (const event of events) {
+    if (event.type === 'user.message') {
+      if (!event.id || !trimmedIds.has(event.id)) continue;
+      const content = event.data?.content || event.data?.transformedContent || '';
+      if (!content) continue;
+      timeline.push({
+        kind: 'message',
+        sequence: sequence++,
+        role: 'user',
+        content,
+        timestamp: new Date(event.timestamp),
+        sourceId: event.id,
+        sourceParentId: event.parentId ?? undefined,
+      });
+    } else if (event.type === 'assistant.message') {
+      const content = event.data?.content || '';
+      const toolRequests = event.data?.toolRequests || [];
+      const messageRetained = Boolean(event.id && trimmedIds.has(event.id));
+
+      if (!messageRetained) continue;
+
+      if (content) {
+        timeline.push({
+          kind: 'message',
+          sequence: sequence++,
+          role: 'assistant',
+          content: typeof content === 'string' ? content : JSON.stringify(content),
+          timestamp: new Date(event.timestamp),
+          sourceId: event.id,
+          sourceParentId: event.parentId ?? undefined,
+        });
+      } else if (toolRequests.length > 0) {
+        const toolNames = toolRequests.map((t) => t.name).join(', ');
+        timeline.push({
+          kind: 'message',
+          sequence: sequence++,
+          role: 'assistant',
+          content: `[Used tools: ${toolNames}]`,
+          timestamp: new Date(event.timestamp),
+          sourceId: event.id,
+          sourceParentId: event.parentId ?? undefined,
+        });
+      }
+
+      // Inline tool requests on the assistant message — emit only when the
+      // assistant message itself is retained. Each sibling gets a distinct
+      // sourceId so they can be told apart, parented to the assistant message.
+      for (const [index, toolRequest] of toolRequests.entries()) {
+        const toolRequestId =
+          getOptionalString((toolRequest as { id?: unknown }).id) ?? `${event.id}:toolRequest:${index}`;
+        timeline.push({
+          kind: 'tool_call',
+          sequence: sequence++,
+          timestamp: new Date(event.timestamp),
+          sourceId: toolRequestId,
+          sourceParentId: event.id,
+          toolName: toolRequest.name,
+          arguments: getCopilotToolArguments(toolRequest),
+        });
+      }
+    } else if (event.type === 'tool.execution_start') {
+      // Anchor by id: tool.execution_start.parentId references its parent message.
+      // Emit only when the parent message is in the trimmed set.
+      const parentId = event.parentId ?? undefined;
+      if (!parentId || !trimmedIds.has(parentId)) continue;
+      const toolName = getOptionalString(event.data?.toolName);
+      if (toolName) {
+        if (event.id) emittedStartToolNames.set(event.id, toolName);
+        timeline.push({
+          kind: 'tool_call',
+          sequence: sequence++,
+          timestamp: new Date(event.timestamp),
+          sourceId: event.id,
+          sourceParentId: event.parentId ?? undefined,
+          toolName,
+          toolCallId: getOptionalString(event.data?.toolCallId),
+          arguments: normalizeCopilotArguments(event.data?.arguments),
+        });
+      }
+    } else if (event.type === 'tool.execution_complete') {
+      // Anchor by id: tool.execution_complete.parentId references its
+      // tool.execution_start event. Emit only when that start was emitted.
+      const parentId = event.parentId ?? undefined;
+      if (!parentId) continue;
+      const startToolName = emittedStartToolNames.get(parentId);
+      if (!startToolName) continue;
+      const result = extractCopilotResult(event.data?.result);
+      timeline.push({
+        kind: 'tool_result',
+        sequence: sequence++,
+        timestamp: new Date(event.timestamp),
+        sourceId: event.id,
+        sourceParentId: event.parentId ?? undefined,
+        toolName: startToolName,
+        toolCallId: getOptionalString(event.data?.toolCallId),
+        status: typeof event.data?.success === 'boolean' ? (event.data.success ? 'success' : 'error') : undefined,
+        result: result.resultText ?? result.resultDetail,
+      });
+    }
+  }
+
   // Generate markdown for injection
   const markdown = generateHandoffMarkdown(
     session,
@@ -213,6 +357,8 @@ export async function extractCopilotContext(
     toolSummaries,
     undefined,
     resolvedConfig,
+    'inline',
+    timeline,
   );
 
   return {
@@ -221,6 +367,7 @@ export async function extractCopilotContext(
     filesModified,
     pendingTasks,
     toolSummaries,
+    timeline,
     markdown,
   };
 }
@@ -352,7 +499,7 @@ function mergeCopilotToolInvocations(events: CopilotEvent[]): CopilotToolInvocat
       for (const toolRequest of event.data?.toolRequests || []) {
         planned.push({
           name: toolRequest.name || 'unknown',
-          arguments: normalizeCopilotArguments(toolRequest.arguments),
+          arguments: getCopilotToolArguments(toolRequest),
           order: order++,
         });
       }
@@ -494,6 +641,13 @@ function getCopilotFilePath(args: Record<string, unknown>): string {
   return getOptionalString(args.path) || getOptionalString(args.file_path) || '';
 }
 
+function getCopilotToolArguments(toolRequest: { args?: unknown; arguments?: unknown }): Record<string, unknown> {
+  return {
+    ...normalizeCopilotArguments(toolRequest.args),
+    ...normalizeCopilotArguments(toolRequest.arguments),
+  };
+}
+
 function normalizeCopilotArguments(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {};
@@ -516,4 +670,47 @@ function stableStringify(value: unknown): string {
       .join(',')}}`;
   }
   return JSON.stringify(value);
+}
+
+// Cap the timestamp scan so discovery (called every list) stays fast on
+// multi-MB events.jsonl files; falls back to workspace.updated_at on the rare
+// session that exceeds the cap.
+const MAX_TIMESTAMP_SCAN_BYTES = 1024 * 1024;
+
+async function extractLastEventTimestamp(
+  eventsPath: string,
+  eventsFileSizeBytes?: number,
+): Promise<Date | undefined> {
+  // If the file exceeds the scan cap, scanJsonlFile would truncate mid-file and leave us
+  // with some early timestamp instead of the actual last event. That would make active
+  // large sessions appear oldest in lists. Skip the scan entirely so the caller's
+  // `?? new Date(workspace.updated_at)` fallback fires. When the caller has already
+  // stat'd the file (parseCopilotSessions), reuse that size to avoid a redundant statSync.
+  let sizeBytes = eventsFileSizeBytes;
+  if (sizeBytes === undefined) {
+    try {
+      sizeBytes = fs.statSync(eventsPath).size;
+    } catch (err) {
+      logger.debug('copilot: failed to stat events.jsonl for timestamp scan', eventsPath, err);
+      return undefined;
+    }
+  }
+  if (sizeBytes > MAX_TIMESTAMP_SCAN_BYTES) {
+    return undefined;
+  }
+
+  let lastTimestamp: Date | undefined;
+  await scanJsonlFile(
+    eventsPath,
+    (parsed) => {
+      const event = parsed as CopilotEvent;
+      const timestamp = event.timestamp ? new Date(event.timestamp) : undefined;
+      if (timestamp && !Number.isNaN(timestamp.getTime())) {
+        lastTimestamp = timestamp;
+      }
+      return 'continue';
+    },
+    { maxBytes: MAX_TIMESTAMP_SCAN_BYTES },
+  );
+  return lastTimestamp;
 }
