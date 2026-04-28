@@ -354,6 +354,146 @@ describe('kiro parser hardening', () => {
     expect(context.markdown).toContain('Kiro fidelity warning');
   });
 
+  it('preserves whitespace-only ACP chunks while reconstructing streamed assistant messages', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kiro-parser-'));
+    tmpHomes.push(home);
+    const sessionDir = createKiroAcpSessionDir(home);
+    const metadataPath = path.join(sessionDir, 'sess_acp_whitespace.json');
+    const eventPath = path.join(sessionDir, 'sess_acp_whitespace.jsonl');
+
+    writeJson(metadataPath, {
+      id: 'sess_acp_whitespace',
+      createdAt: '2026-02-06T01:00:00.000Z',
+      updatedAt: '2026-02-06T01:01:00.000Z',
+    });
+    writeJsonl(eventPath, [
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess_acp_whitespace',
+          content: 'Stream a greeting',
+        },
+      },
+      {
+        jsonrpc: '2.0',
+        method: 'session/notification',
+        params: {
+          sessionId: 'sess_acp_whitespace',
+          update: { type: 'AgentMessageChunk', content: 'hello' },
+        },
+      },
+      {
+        jsonrpc: '2.0',
+        method: 'session/notification',
+        params: {
+          sessionId: 'sess_acp_whitespace',
+          update: { type: 'AgentMessageChunk', content: ' ' },
+        },
+      },
+      {
+        jsonrpc: '2.0',
+        method: 'session/notification',
+        params: {
+          sessionId: 'sess_acp_whitespace',
+          update: { type: 'AgentMessageChunk', content: 'world' },
+        },
+      },
+      {
+        jsonrpc: '2.0',
+        method: 'session/notification',
+        params: {
+          sessionId: 'sess_acp_whitespace',
+          update: { type: 'TurnEnd' },
+        },
+      },
+    ]);
+
+    const { extractKiroContext, parseKiroSessions } = await loadKiroParserWithHome(home);
+    const sessions = await parseKiroSessions();
+    const context = await extractKiroContext(sessions[0]);
+
+    expect(context.recentMessages).toEqual([
+      { role: 'user', content: 'Stream a greeting', timestamp: undefined },
+      { role: 'assistant', content: 'hello world', timestamp: undefined },
+    ]);
+  });
+
+  it('counts ACP ToolCallUpdate records as updates to a matching tool call', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kiro-parser-'));
+    tmpHomes.push(home);
+    const sessionDir = createKiroAcpSessionDir(home);
+    const metadataPath = path.join(sessionDir, 'sess_acp_tool_update.json');
+    const eventPath = path.join(sessionDir, 'sess_acp_tool_update.jsonl');
+
+    writeJson(metadataPath, {
+      id: 'sess_acp_tool_update',
+      createdAt: '2026-02-07T01:00:00.000Z',
+      updatedAt: '2026-02-07T01:01:00.000Z',
+    });
+    writeJsonl(eventPath, [
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess_acp_tool_update',
+          content: 'Read the parser',
+        },
+      },
+      {
+        jsonrpc: '2.0',
+        method: 'session/notification',
+        params: {
+          sessionId: 'sess_acp_tool_update',
+          update: {
+            type: 'ToolCall',
+            id: 'tool-call-1',
+            name: 'readTextFile',
+            parameters: { path: 'src/parsers/kiro.ts' },
+            status: 'running',
+          },
+        },
+      },
+      {
+        jsonrpc: '2.0',
+        method: 'session/notification',
+        params: {
+          sessionId: 'sess_acp_tool_update',
+          update: {
+            type: 'ToolCallUpdate',
+            id: 'tool-call-1',
+            name: 'readTextFile',
+            result: 'Loaded parser contents',
+            status: 'completed',
+          },
+        },
+      },
+    ]);
+
+    const { extractKiroContext, parseKiroSessions } = await loadKiroParserWithHome(home);
+    const sessions = await parseKiroSessions();
+    const context = await extractKiroContext(sessions[0]);
+
+    expect(context.toolSummaries).toEqual([
+      expect.objectContaining({
+        name: 'readTextFile',
+        count: 1,
+        samples: [
+          expect.objectContaining({
+            summary: 'readTextFile({"path":"src/parsers/kiro.ts"}) → "Loaded parser contents" [completed]',
+            data: expect.objectContaining({
+              category: 'mcp',
+              toolName: 'readTextFile',
+              result: 'Loaded parser contents',
+            }),
+          }),
+        ],
+      }),
+    ]);
+  });
+
   it('skips unknown CLI SQLite stores safely and reports the parser fidelity limit', async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kiro-parser-'));
     tmpHomes.push(home);

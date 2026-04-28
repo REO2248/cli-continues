@@ -348,8 +348,9 @@ function getAcpRecordType(record: JsonRecord | undefined): string | undefined {
 function extractAcpRecordText(record: JsonRecord | undefined): string {
   if (!record) return '';
   for (const key of ['content', 'text', 'message', 'delta', 'chunk', 'data']) {
+    if (!(key in record)) continue;
     const text = extractContent(record[key]);
-    if (text.trim()) return text;
+    if (text.length > 0 || typeof record[key] === 'string') return text;
   }
   return '';
 }
@@ -419,7 +420,7 @@ function extractAcpMessages(events: readonly unknown[]): ConversationMessage[] {
 
     if (updateType === 'AgentMessageChunk') {
       const chunk = extractAcpRecordText(update);
-      if (chunk.trim()) {
+      if (chunk.length > 0) {
         pendingAssistant += chunk;
         pendingAssistantTimestamp ??= extractAcpTimestamp(update, event);
       }
@@ -509,31 +510,91 @@ function formatToolParams(record: JsonRecord | undefined): string {
   }
 }
 
+interface AcpToolInvocation {
+  toolName: string;
+  params: string;
+  result: string;
+  status?: string;
+  isError: boolean;
+}
+
+function getAcpToolCallId(record: JsonRecord | undefined): string | undefined {
+  return getString(record, ['toolCallId', 'callId', 'id', 'toolUseId', 'invocationId']);
+}
+
+function isFailedToolStatus(status: string | undefined): boolean {
+  const normalized = status?.toLowerCase();
+  return normalized === 'error' || normalized === 'failed';
+}
+
+function mergeAcpToolUpdate(invocation: AcpToolInvocation, update: JsonRecord): void {
+  const updateToolName = getString(update, ['name', 'toolName', 'title']);
+  if (updateToolName && updateToolName !== invocation.toolName) return;
+
+  const params = formatToolParams(update);
+  if (!invocation.params && params) invocation.params = params;
+
+  const result = extractContent(update.result ?? update.output).trim();
+  if (result) invocation.result = result;
+
+  const status = getString(update, ['status', 'state']);
+  if (status) {
+    invocation.status = status;
+    invocation.isError ||= isFailedToolStatus(status);
+  }
+}
+
 function extractAcpToolSummaries(events: readonly unknown[], config?: VerbosityConfig): ToolUsageSummary[] {
-  const collector = new SummaryCollector(config);
+  const invocations: AcpToolInvocation[] = [];
+  const invocationsById = new Map<string, AcpToolInvocation>();
 
   for (const event of events) {
     if (!isRecord(event)) continue;
     const update = getAcpUpdate(event);
     const updateType = getAcpRecordType(update);
-    if (updateType !== 'ToolCall' && updateType !== 'ToolCallUpdate') continue;
+    if (!update) continue;
 
-    const toolName = getString(update, ['name', 'toolName', 'title']);
-    if (!toolName) continue;
+    if (updateType === 'ToolCall') {
+      const toolName = getString(update, ['name', 'toolName', 'title']);
+      if (!toolName) continue;
 
-    const params = formatToolParams(update);
-    const result = extractContent(update?.result ?? update?.output).trim();
-    const status = getString(update, ['status', 'state']);
-    const summary = `${mcpSummary(toolName, params, result)}${status ? ` [${status}]` : ''}`;
+      const status = getString(update, ['status', 'state']);
+      const invocation: AcpToolInvocation = {
+        toolName,
+        params: formatToolParams(update),
+        result: extractContent(update.result ?? update.output).trim(),
+        status,
+        isError: isFailedToolStatus(status),
+      };
+      invocations.push(invocation);
 
-    collector.add(toolName, summary, {
+      const toolCallId = getAcpToolCallId(update);
+      if (toolCallId) invocationsById.set(toolCallId, invocation);
+      continue;
+    }
+
+    if (updateType === 'ToolCallUpdate') {
+      const toolCallId = getAcpToolCallId(update);
+      const invocation = toolCallId ? invocationsById.get(toolCallId) : undefined;
+      if (invocation) mergeAcpToolUpdate(invocation, update);
+    }
+  }
+
+  const collector = new SummaryCollector(config);
+
+  for (const invocation of invocations) {
+    const summary = `${mcpSummary(invocation.toolName, invocation.params, invocation.result)}${
+      invocation.status ? ` [${invocation.status}]` : ''
+    }`;
+
+    collector.add(invocation.toolName, summary, {
       data: {
         category: 'mcp',
-        toolName,
-        ...(params ? { params } : {}),
-        ...(result ? { result } : {}),
+        toolName: invocation.toolName,
+        ...(invocation.params ? { params: invocation.params } : {}),
+        ...(invocation.result ? { result: invocation.result } : {}),
       },
-      isError: status === 'error' || status === 'failed',
+      isError: invocation.isError,
     });
   }
 
