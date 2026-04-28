@@ -8,6 +8,7 @@ import { logger } from '../logger.js';
 import type {
   ConversationMessage,
   SessionContext,
+  SessionEvent,
   SessionNotes,
   ToolCall,
   ToolUsageSummary,
@@ -193,9 +194,15 @@ function renderToolPart(partData: Record<string, unknown>): {
 } | null {
   const toolName = typeof partData.tool === 'string' ? partData.tool : 'tool';
   const state = isRecord(partData.state) ? partData.state : {};
+  const metadata = getRecordValue(state, 'metadata');
   const status = typeof state.status === 'string' ? state.status : undefined;
-  const resultPreview = previewUnknown(state.output) || previewUnknown(state.error);
+  const outputString = stringifyToolValue(state.output);
+  const errorString = stringifyToolValue(state.error);
+  const fullResult = outputString && outputString.length > 0 ? outputString : errorString;
+  const resultPreview = fullResult ? previewUnknown(fullResult) : '';
   const argPreview = previewUnknown(state.input, 120);
+  const exitCode = firstNumber(metadata, ['exit', 'exitCode']);
+  const metadataIndicatesError = exitCode !== undefined && exitCode !== 0;
 
   const detailBits = [argPreview, resultPreview].filter(Boolean);
   const statusLabel = status ? ` ${status}` : '';
@@ -205,7 +212,11 @@ function renderToolPart(partData: Record<string, unknown>): {
     Boolean,
   );
   const summary = summaryBits.length > 0 ? summaryBits.join(' | ') : 'invoked';
-  const success = status === 'completed' ? true : status === 'error' ? false : undefined;
+  let success: boolean | undefined;
+  if (status === 'error' || metadataIndicatesError) success = false;
+  else if (status === 'completed') success = true;
+
+  const normalizedArguments = normalizeToolArguments(state.input);
 
   return {
     content,
@@ -215,9 +226,10 @@ function renderToolPart(partData: Record<string, unknown>): {
     toolCall: {
       name: toolName,
       ...(typeof partData.callID === 'string' ? { id: partData.callID } : {}),
-      ...(normalizeToolArguments(state.input) ? { arguments: normalizeToolArguments(state.input) } : {}),
-      ...(resultPreview ? { result: resultPreview } : {}),
+      ...(normalizedArguments ? { arguments: normalizedArguments } : {}),
+      ...(fullResult ? { result: fullResult } : {}),
       ...(success !== undefined ? { success } : {}),
+      ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
     },
   };
 }
@@ -1159,6 +1171,16 @@ function extractSessionNotesFromSqlite(sessionId: string): SessionNotes | undefi
       }
 
       if (reasoning.length > 0) notes.reasoning = reasoning;
+      const sessionRow = db.prepare('SELECT project_id, slug, version FROM session WHERE id = ?').get(sessionId) as
+        | { project_id?: string; slug?: string; version?: string }
+        | undefined;
+      if (sessionRow) {
+        notes.sourceMetadata = {
+          ...(sessionRow.slug ? { slug: sessionRow.slug } : {}),
+          ...(sessionRow.version ? { version: sessionRow.version } : {}),
+          ...(sessionRow.project_id ? { projectId: sessionRow.project_id } : {}),
+        };
+      }
       return Object.keys(notes).length > 0 ? notes : undefined;
     } catch (err) {
       logger.debug('opencode: failed to extract SQLite session notes', dbPath, sessionId, err);
@@ -1220,6 +1242,30 @@ function extractSessionNotesFromJson(sessionId: string): SessionNotes | undefine
     if (firstCreated !== undefined && lastCreated !== undefined && lastCreated >= firstCreated) {
       notes.activeTimeMs = lastCreated - firstCreated;
     }
+
+    for (const projectDir of listSubdirectories(path.join(getOpenCodeStorageDir(), 'session'))) {
+      const sessionFile = path.join(projectDir, `${sessionId}.json`);
+      if (!fs.existsSync(sessionFile)) continue;
+      const content = fs.readFileSync(sessionFile, 'utf8');
+      let parsedJson: unknown;
+      try {
+        parsedJson = JSON.parse(content);
+      } catch (err) {
+        // One malformed session file shouldn't lose the reasoning/token/activeTime
+        // already extracted from the message dir for this session.
+        logger.debug('opencode: skipping malformed session file', sessionFile, err);
+        continue;
+      }
+      const result = OpenCodeSessionSchema.safeParse(parsedJson);
+      if (result.success) {
+        notes.sourceMetadata = {
+          ...(result.data.slug ? { slug: result.data.slug } : {}),
+          ...(result.data.version ? { version: result.data.version } : {}),
+          ...(result.data.projectID ? { projectId: result.data.projectID } : {}),
+        };
+      }
+      break;
+    }
   } catch (err) {
     logger.debug('opencode: failed to extract JSON session notes', sessionId, err);
   }
@@ -1268,6 +1314,7 @@ export async function extractOpenCodeContext(
   const sessionNotes = extractOpenCodeSessionNotes(session.id);
 
   const trimmed = trimMessages(recentMessages, resolvedConfig.recentMessages);
+  const timeline = buildOpenCodeTimeline(trimmed, resolvedConfig.handoff.timelineWindow);
 
   const markdown = generateHandoffMarkdown(
     session,
@@ -1277,6 +1324,8 @@ export async function extractOpenCodeContext(
     toolData.summaries,
     sessionNotes,
     resolvedConfig,
+    'inline',
+    timeline,
   );
 
   return {
@@ -1286,6 +1335,87 @@ export async function extractOpenCodeContext(
     pendingTasks,
     toolSummaries: toolData.summaries,
     ...(sessionNotes ? { sessionNotes } : {}),
+    timeline,
     markdown,
   };
+}
+
+function buildOpenCodeTimeline(messages: ConversationMessage[], timelineWindow?: number): SessionEvent[] {
+  // Build per-message clusters of (one message event + N tool_call events) so we can
+  // budget the tool events without dropping any preserved user/assistant message.
+  type Cluster = { message: SessionEvent; tools: SessionEvent[] };
+  const clusters: Cluster[] = [];
+  let sequence = 0;
+
+  for (const message of messages) {
+    const messageEvent: SessionEvent = {
+      kind: 'message',
+      sequence: sequence++,
+      role: message.role,
+      content: message.content,
+      timestamp: message.timestamp,
+      sourceId: message.sourceId,
+    };
+    const toolEvents: SessionEvent[] = [];
+    for (const toolCall of message.toolCalls ?? []) {
+      toolEvents.push({
+        kind: 'tool_call',
+        sequence: sequence++,
+        timestamp: message.timestamp,
+        toolName: toolCall.name,
+        toolCallId: toolCall.id,
+        status: toolCall.success === undefined ? undefined : toolCall.success ? 'success' : 'error',
+        arguments: toolCall.arguments,
+        result: toolCall.result,
+        metadata: toolCall.metadata,
+      });
+    }
+    clusters.push({ message: messageEvent, tools: toolEvents });
+  }
+
+  const totalEvents = clusters.reduce((sum, cluster) => sum + 1 + cluster.tools.length, 0);
+
+  // When the consumer's tail-slice (timelineWindow) cannot fit every event we built,
+  // budget tool events around the messages so the slice still contains the preserved
+  // user prompts. Each cluster keeps its message event; remaining budget is distributed
+  // round-robin over tool events from the latest cluster backwards.
+  if (timelineWindow !== undefined && timelineWindow > 0 && totalEvents > timelineWindow) {
+    const messageCount = clusters.length;
+    if (messageCount > timelineWindow) {
+      // Even the message events alone exceed the window; keep the most recent
+      // clusters (already preserves the latest user prompt) and drop all tool
+      // events so the consumer's tail-slice cannot evict messages.
+      const tail = clusters.slice(-timelineWindow);
+      tail.forEach((cluster) => {
+        cluster.tools = [];
+      });
+      clusters.length = 0;
+      clusters.push(...tail);
+      const trimmedEvents: SessionEvent[] = [];
+      for (const cluster of clusters) trimmedEvents.push(cluster.message);
+      return trimmedEvents;
+    }
+    let toolBudget = Math.max(0, timelineWindow - messageCount);
+    // Walk clusters from newest to oldest, allocating tool slots so trailing tool
+    // activity is preserved alongside the user prompts that introduced it.
+    const allowed: number[] = clusters.map(() => 0);
+    for (let i = clusters.length - 1; i >= 0 && toolBudget > 0; i--) {
+      const take = Math.min(toolBudget, clusters[i].tools.length);
+      allowed[i] = take;
+      toolBudget -= take;
+    }
+    for (let i = 0; i < clusters.length; i++) {
+      // Keep the most recent tool calls within each cluster (the trailing ones the
+      // assistant emitted just before the next message). slice(-0) === slice(0)
+      // returns the full array, so guard the zero-budget case explicitly.
+      clusters[i].tools = allowed[i] > 0 ? clusters[i].tools.slice(-allowed[i]) : [];
+    }
+  }
+
+  const events: SessionEvent[] = [];
+  for (const cluster of clusters) {
+    events.push(cluster.message);
+    for (const tool of cluster.tools) events.push(tool);
+  }
+  return events;
 }
