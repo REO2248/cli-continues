@@ -135,6 +135,49 @@ function getCategoryOrder(name: string): number {
 }
 
 /**
+ * Render the `## Source Fidelity` section from parser-emitted SessionNotes.
+ *
+ * Whitespace inside each warning is collapsed to single spaces so multi-line
+ * parser strings render as single bullet entries. Empty/whitespace-only
+ * warnings are filtered out so a parser pushing an inadvertently-blank entry
+ * does not emit a stray bullet.
+ *
+ * Order is preserved as the parser pushed them — each parser writes its
+ * warnings in a single linear pass, so duplicates within one parser are
+ * unexpected; deduplicating across parsers does not apply because a session
+ * has exactly one source parser. Preserving order keeps the rendered output
+ * traceable back to the parser code path that produced each warning.
+ */
+function renderSourceFidelity(
+  notes: SessionNotes | undefined,
+  cwd: string | undefined,
+  config: VerbosityConfig,
+): string[] {
+  const warnings =
+    notes?.fidelityWarnings?.map((warning) => warning.replace(/\s+/gu, ' ').trim()).filter(Boolean) ?? [];
+  const rawAccess = notes?.rawAccess;
+  if (!rawAccess && warnings.length === 0) return [];
+
+  const lines: string[] = ['## Source Fidelity', ''];
+
+  if (rawAccess) {
+    // 'sqlite' renders as a friendly label; 'file' and 'directory' fall through
+    // as-is so the discriminant stays human-readable in the output.
+    const kind = rawAccess.kind === 'sqlite' ? 'SQLite database' : rawAccess.kind;
+    const location = rawAccess.redacted ? 'path redacted by parser' : `\`${displayPath(rawAccess.path, cwd, config)}\``;
+    lines.push(`- **Raw source**: ${kind} at ${location}`);
+  }
+
+  if (warnings.length > 0) {
+    for (const warning of warnings) lines.push(`- **Fidelity warning**: ${warning}`);
+  }
+
+  lines.push('');
+  lines.push('');
+  return lines;
+}
+
+/**
  * Generate a markdown handoff document from any session source.
  * Shared by all parsers to avoid duplicated logic.
  */
@@ -203,6 +246,10 @@ export function generateHandoffMarkdown(
   lines.push(`| **Messages** | ${messages.length} |`);
   lines.push('');
   lines.push('');
+
+  // Surface fidelity warnings up-front so the receiving agent sees provenance caveats
+  // before consuming the conversation/tool activity below.
+  lines.push(...renderSourceFidelity(sessionNotes, session.cwd, config));
 
   if (session.summary) {
     lines.push('## Summary');

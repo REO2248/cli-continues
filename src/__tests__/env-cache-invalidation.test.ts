@@ -190,6 +190,18 @@ describe('env fingerprint cache invalidation (issue #18)', () => {
     expect(indexNeedsRebuild()).toBe(true);
   });
 
+  it('tracks Qwen Code storage env vars in the cache fingerprint', () => {
+    const adapter = adapters['qwen-code'];
+    expect(adapter.envVar).toBe('QWEN_RUNTIME_DIR');
+    expect(adapter.extraEnvVars).toEqual(expect.arrayContaining(['QWEN_HOME']));
+
+    writeIndex(currentFingerprint(), [makeSession('sess-1', 'qwen-code')]);
+
+    vi.stubEnv('QWEN_RUNTIME_DIR', '/home/user/.qwen-runtime');
+
+    expect(indexNeedsRebuild()).toBe(true);
+  });
+
   it('loadIndex skips the fingerprint line and returns only sessions', () => {
     writeIndex('#env:CLAUDE_CONFIG_DIR=', [makeSession('sess-1', 'claude'), makeSession('sess-2', 'codex')]);
 

@@ -112,7 +112,8 @@ describe('cursor parser confidence warnings', () => {
       expect.arrayContaining([expect.stringContaining('Cursor transcript completeness warning')]),
     );
     expect(context.sessionNotes?.reasoning).toBeUndefined();
-    expect(context.markdown).not.toContain('Cursor transcript completeness warning');
+    expect(context.markdown).toContain('## Source Fidelity');
+    expect(context.markdown).toContain('Cursor transcript completeness warning');
 
     const bashSummary = context.toolSummaries.find((summary) => summary.name === 'Bash');
     expect(bashSummary?.samples[0]?.summary).toBe('$ pnpm test');
@@ -297,7 +298,7 @@ describe('cursor parser hardening', () => {
     expect(context.sessionNotes?.reasoning).toBeUndefined();
     expect(context.toolSummaries.find((summary) => summary.name === 'Bash')?.samples[0]?.summary).toBe('$ pnpm test');
     expect(context.markdown).not.toContain('system_reminder');
-    expect(context.markdown).not.toContain('local agent-transcripts are partial exports');
+    expect(context.markdown).toContain('local agent-transcripts are partial exports');
   });
 
   it('keeps long transcripts whose first parseable record sits past the head scan window', async () => {
