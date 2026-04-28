@@ -6,7 +6,9 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { getPreset } from '../config/index.js';
+import { logger } from '../logger.js';
 import type { ConversationMessage } from '../types/index.js';
 import { classifyToolName } from '../types/tool-names.js';
 import {
@@ -17,8 +19,8 @@ import {
   isSystemContent,
 } from '../utils/content.js';
 import { countDiffStats, extractStdoutTail, formatEditDiff, formatNewFileDiff } from '../utils/diff.js';
-import { findFiles, listSubdirectories } from '../utils/fs-helpers.js';
-import { getFileStats, readJsonlFile, scanJsonlHead } from '../utils/jsonl.js';
+import { findFiles, listSubdirectories, mapConcurrent } from '../utils/fs-helpers.js';
+import { getFileStats, readJsonlFile, scanJsonlFile, scanJsonlHead } from '../utils/jsonl.js';
 import { extractRepo, trimMessages } from '../utils/parser-helpers.js';
 import {
   type AnthropicMessage,
@@ -157,6 +159,60 @@ describe('scanJsonlHead', () => {
   });
 });
 
+describe('scanJsonlFile', () => {
+  it('streams every valid JSONL line', async () => {
+    const dir = makeTmpDir();
+    const file = path.join(dir, 'test.jsonl');
+    const lines = Array.from({ length: 120 }, (_, i) => JSON.stringify({ i }));
+    fs.writeFileSync(file, `${lines.join('\n')}\n`);
+
+    const visited: number[] = [];
+    await scanJsonlFile(file, (parsed) => {
+      visited.push((parsed as { i: number }).i);
+      return 'continue';
+    });
+
+    expect(visited.at(0)).toBe(0);
+    expect(visited.at(-1)).toBe(119);
+    expect(visited).toHaveLength(120);
+  });
+
+  it('supports early stop via visitor', async () => {
+    const dir = makeTmpDir();
+    const file = path.join(dir, 'test.jsonl');
+    fs.writeFileSync(file, '{"type":"a"}\n{"type":"b"}\n{"type":"c"}\n');
+
+    const visited: string[] = [];
+    await scanJsonlFile(file, (parsed) => {
+      const p = parsed as { type: string };
+      visited.push(p.type);
+      return p.type === 'b' ? 'stop' : 'continue';
+    });
+
+    expect(visited).toEqual(['a', 'b']);
+  });
+
+  it('skips malformed lines without logging parser error objects', async () => {
+    const dir = makeTmpDir();
+    const file = path.join(dir, 'test.jsonl');
+    fs.writeFileSync(file, '{"i":1}\nnot-json\n{"i":2}\n');
+    const debugSpy = vi.spyOn(logger, 'debug').mockImplementation(() => {
+      // keep test output quiet
+    });
+
+    const visited: number[] = [];
+    await scanJsonlFile(file, (parsed) => {
+      visited.push((parsed as { i: number }).i);
+      return 'continue';
+    });
+
+    expect(visited).toEqual([1, 2]);
+    expect(debugSpy).toHaveBeenCalledWith('jsonl: skipping invalid line at index', 1, 'in', file);
+    expect(debugSpy.mock.calls[0]).toHaveLength(4);
+    debugSpy.mockRestore();
+  });
+});
+
 describe('getFileStats', () => {
   it('returns line count and byte size', async () => {
     const dir = makeTmpDir();
@@ -244,6 +300,17 @@ describe('listSubdirectories', () => {
 
   it('returns empty for non-existent directory', () => {
     expect(listSubdirectories('/tmp/nonexistent-dir')).toEqual([]);
+  });
+});
+
+describe('mapConcurrent', () => {
+  it('preserves input order while mapping concurrently', async () => {
+    const result = await mapConcurrent([3, 1, 2], 2, async (value, index) => {
+      await new Promise((resolve) => setTimeout(resolve, (3 - index) * 2));
+      return `${index}:${value}`;
+    });
+
+    expect(result).toEqual(['0:3', '1:1', '2:2']);
   });
 });
 
@@ -421,6 +488,126 @@ describe('extractAnthropicToolData', () => {
     expect(filesModified).toContain('/tmp/edited-by-morph.ts');
   });
 
+  it('tracks files modified by morph___edit_file', () => {
+    const messages: AnthropicMessage[] = [
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'tu1',
+            name: 'morph___edit_file',
+            input: { path: '/tmp/edited-by-morph-alias.ts', instruction: 'edit file', code_edit: '...' },
+          },
+        ],
+      },
+    ];
+
+    const { filesModified, summaries } = extractAnthropicToolData(messages);
+    expect(filesModified).toContain('/tmp/edited-by-morph-alias.ts');
+    expect(summaries[0].samples[0].data).toMatchObject({
+      category: 'edit',
+      filePath: '/tmp/edited-by-morph-alias.ts',
+    });
+  });
+
+  it('builds edit diff data from Droid old_str/new_str inputs', () => {
+    const messages: AnthropicMessage[] = [
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'tu1',
+            name: 'Edit',
+            input: { path: '/tmp/droid-edit.ts', old_str: 'old value', new_str: 'new value' },
+          },
+        ],
+      },
+    ];
+
+    const { filesModified, summaries } = extractAnthropicToolData(messages);
+    expect(filesModified).toContain('/tmp/droid-edit.ts');
+    expect(summaries[0].samples[0].data).toMatchObject({
+      category: 'edit',
+      filePath: '/tmp/droid-edit.ts',
+      diffStats: { added: 1, removed: 1 },
+    });
+  });
+
+  it('tracks ApplyPatch file paths from patch input text', () => {
+    const patch = ['*** Begin Patch', '*** Update File: src/example.ts', '@@', '-old', '+new', '*** End Patch'].join(
+      '\n',
+    );
+    const messages: AnthropicMessage[] = [
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'tu1', name: 'ApplyPatch', input: { input: patch } }],
+      },
+    ];
+
+    const { filesModified, summaries } = extractAnthropicToolData(messages);
+    expect(filesModified).toContain('src/example.ts');
+    expect(summaries[0].samples[0].data).toMatchObject({
+      category: 'edit',
+      filePath: 'src/example.ts',
+    });
+  });
+
+  it('strips tab timestamp suffixes from unified diff file paths', () => {
+    const patch = [
+      '--- a/src/example.ts\t2026-04-27 10:00:00',
+      '+++ b/src/example.ts\t2026-04-27 10:01:00',
+      '@@',
+      '-old',
+      '+new',
+    ].join('\n');
+    const messages: AnthropicMessage[] = [
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'tu1', name: 'ApplyPatch', input: { patch } }],
+      },
+    ];
+
+    const { filesModified, summaries } = extractAnthropicToolData(messages);
+
+    expect(filesModified).toContain('src/example.ts');
+    expect(filesModified.some((filePath) => filePath.includes('\t'))).toBe(false);
+    expect(summaries[0].samples[0].data).toMatchObject({
+      category: 'edit',
+      filePath: 'src/example.ts',
+    });
+  });
+
+  it('caps stored patch diffs at the edit max chars limit', () => {
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: src/big.ts',
+      '@@',
+      ...Array.from({ length: 40 }, (_, index) => `+line ${index}`),
+      '*** End Patch',
+    ].join('\n');
+    const config = {
+      ...getPreset('minimal'),
+      edit: { ...getPreset('minimal').edit, maxChars: 80 },
+    };
+    const messages: AnthropicMessage[] = [
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'tu1', name: 'ApplyPatch', input: { input: patch } }],
+      },
+    ];
+
+    const { summaries } = extractAnthropicToolData(messages, config);
+    const sample = summaries[0].samples[0].data;
+
+    expect(sample).toMatchObject({ category: 'edit', filePath: 'src/big.ts' });
+    if (sample?.category === 'edit') {
+      expect(sample.diff?.length).toBeLessThanOrEqual(80);
+      expect(sample.diff).toContain('...');
+    }
+  });
+
   it('handles empty messages', () => {
     const { summaries, filesModified } = extractAnthropicToolData([]);
     expect(summaries).toEqual([]);
@@ -549,6 +736,7 @@ describe('classifyToolName', () => {
     expect(classifyToolName('Write')).toBe('write');
     expect(classifyToolName('Edit')).toBe('edit');
     expect(classifyToolName('apply_diff')).toBe('edit');
+    expect(classifyToolName('create')).toBe('write');
     expect(classifyToolName('create_file')).toBe('write');
   });
 

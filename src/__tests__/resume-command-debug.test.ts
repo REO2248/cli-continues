@@ -59,6 +59,9 @@ describe('resumeCommand debug prompt option', () => {
   const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {
     // Silence command output during tests.
   });
+  const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {
+    // Silence error output during tests.
+  });
 
   afterEach(() => {
     findSessionMock.mockReset();
@@ -67,6 +70,8 @@ describe('resumeCommand debug prompt option', () => {
     getResumeCommandMock.mockClear();
     resolveCrossToolForwardingMock.mockClear();
     logSpy.mockClear();
+    errorSpy.mockClear();
+    chdirSpy.mockClear();
     process.exitCode = undefined;
   });
 
@@ -84,5 +89,20 @@ describe('resumeCommand debug prompt option', () => {
     expect(output).not.toContain('Session:');
     expect(output).not.toContain('Command:');
     expect(chdirSpy).toHaveBeenCalledWith('/tmp/project');
+  });
+
+  it('rejects invalid --in targets before resolving forwarding or resuming', async () => {
+    findSessionMock.mockResolvedValue(makeSession());
+
+    await resumeCommand('resume-debug-test', { in: 'not-a-tool', noTui: true } as never, {
+      isTTY: false,
+    });
+
+    expect(process.exitCode).toBe(1);
+    expect(resolveCrossToolForwardingMock).not.toHaveBeenCalled();
+    expect(getResumeCommandMock).not.toHaveBeenCalled();
+    expect(resumeMock).not.toHaveBeenCalled();
+    expect(chdirSpy).not.toHaveBeenCalledWith('/tmp/project');
+    expect(errorSpy.mock.calls.map((call) => call.join(' ')).join('\n')).toContain('Unknown target tool: not-a-tool');
   });
 });

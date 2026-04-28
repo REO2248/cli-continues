@@ -93,4 +93,15 @@ describe('crossToolResume debug prompt mode', () => {
     expect(output).toContain('Read `.continues-handoff.md` first, then continue the work.');
     expect(spawnMock).not.toHaveBeenCalled();
   });
+
+  it('rejects invalid runtime targets before extracting context or writing handoff files', async () => {
+    const session = makeSession(cwd);
+
+    await expect(crossToolResume(session, 'not-a-tool' as never)).rejects.toThrow('Unknown source: "not-a-tool"');
+
+    expect(extractContextMock).not.toHaveBeenCalled();
+    expect(saveContextMock).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(cwd, '.continues-handoff.md'))).toBe(false);
+  });
 });

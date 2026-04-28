@@ -26,6 +26,10 @@ export const TOOL_NAMES = Object.freeze([
 /** Source CLI tool — derived from TOOL_NAMES, never defined manually */
 export type SessionSource = (typeof TOOL_NAMES)[number];
 
+export function isSessionSource(value: string): value is SessionSource {
+  return (TOOL_NAMES as readonly string[]).includes(value);
+}
+
 // ── Canonical Tool Name Sets ────────────────────────────────────────────────
 // Used by all parsers to classify tool invocations consistently.
 // Each set contains all known aliases for a tool category across every CLI.
@@ -47,7 +51,14 @@ export const SHELL_TOOLS: ReadonlySet<string> = new Set([
 export const READ_TOOLS: ReadonlySet<string> = new Set(['Read', 'ReadFile', 'read_file']);
 
 /** File write/create tools */
-export const WRITE_TOOLS: ReadonlySet<string> = new Set(['Write', 'WriteFile', 'write_file', 'Create', 'create_file']);
+export const WRITE_TOOLS: ReadonlySet<string> = new Set([
+  'Write',
+  'WriteFile',
+  'write_file',
+  'Create',
+  'create',
+  'create_file',
+]);
 
 /** File edit/patch tools */
 export const EDIT_TOOLS: ReadonlySet<string> = new Set([
@@ -59,6 +70,8 @@ export const EDIT_TOOLS: ReadonlySet<string> = new Set([
   'apply_patch',
   'ApplyPatch',
   'replace',
+  'mcp__morph__edit_file',
+  'morph___edit_file',
 ]);
 
 /** Search/grep tools */
@@ -90,7 +103,7 @@ export const SEARCH_TOOLS: ReadonlySet<string> = new Set(['WebSearch', 'web_sear
 export const FETCH_TOOLS: ReadonlySet<string> = new Set(['WebFetch', 'web_fetch']);
 
 /** Subagent/task tools */
-export const TASK_TOOLS: ReadonlySet<string> = new Set(['Task', 'task']);
+export const TASK_TOOLS: ReadonlySet<string> = new Set(['Task', 'task', 'Agent']);
 
 /** Task output tools */
 export const TASK_OUTPUT_TOOLS: ReadonlySet<string> = new Set(['TaskOutput']);

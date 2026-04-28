@@ -158,8 +158,34 @@ export async function scanJsonlHead(
       try {
         const parsed = JSON.parse(line);
         return visitor(parsed, lineIndex);
-      } catch (err) {
-        logger.debug('jsonl: skipping invalid line at index', lineIndex, 'in', filePath, err);
+      } catch {
+        logger.debug('jsonl: skipping invalid line at index', lineIndex, 'in', filePath);
+      }
+      return 'continue';
+    },
+    options,
+  );
+}
+
+/**
+ * Scan every parsed JSONL line, calling `visitor` for each valid record.
+ * The visitor returns 'continue' to keep reading or 'stop' to abort early.
+ */
+export async function scanJsonlFile(
+  filePath: string,
+  visitor: (parsed: unknown, lineIndex: number) => 'continue' | 'stop',
+  options?: JsonlReadOptions,
+): Promise<void> {
+  if (!fs.existsSync(filePath)) return;
+
+  await scanJsonlLines(
+    filePath,
+    (line, lineIndex) => {
+      try {
+        const parsed = JSON.parse(line);
+        return visitor(parsed, lineIndex);
+      } catch {
+        logger.debug('jsonl: skipping invalid line at index', lineIndex, 'in', filePath);
       }
       return 'continue';
     },

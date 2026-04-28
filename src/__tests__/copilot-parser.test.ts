@@ -371,4 +371,125 @@ describe('copilot parser regressions', () => {
       stdoutTail: 'M src/parsers/copilot.ts\n<exited with exit code 0>',
     });
   });
+
+  it('keeps conversation messages when the raw event tail contains only tool execution events', async () => {
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'copilot-home-'));
+    const copilotHome = fs.mkdtempSync(path.join(os.tmpdir(), 'copilot-config-'));
+    tmpDirs.push(fakeHome, copilotHome);
+
+    const toolEvents = Array.from({ length: 12 }, (_, index) => [
+      {
+        type: 'tool.execution_start',
+        id: `evt-tool-start-${index}`,
+        timestamp: `2026-04-15T10:01:${String(index).padStart(2, '0')}.000Z`,
+        parentId: 'evt-003',
+        data: {
+          toolCallId: `tool-${index}`,
+          toolName: 'bash',
+          arguments: { command: `echo ${index}` },
+        },
+      },
+      {
+        type: 'tool.execution_complete',
+        id: `evt-tool-complete-${index}`,
+        timestamp: `2026-04-15T10:02:${String(index).padStart(2, '0')}.000Z`,
+        parentId: `evt-tool-start-${index}`,
+        data: {
+          toolCallId: `tool-${index}`,
+          success: true,
+          result: { content: `done ${index}` },
+        },
+      },
+    ]).flat();
+
+    const sessionDir = createCopilotSession({
+      copilotHome,
+      sessionId: 'tail-tool-events-session',
+      events: [
+        {
+          type: 'session.start',
+          id: 'evt-001',
+          timestamp: '2026-04-15T10:00:00.000Z',
+          parentId: null,
+          data: { sessionId: 'tail-tool-events-session', selectedModel: 'claude-sonnet-4' },
+        },
+        {
+          type: 'user.message',
+          id: 'evt-002',
+          timestamp: '2026-04-15T10:00:01.000Z',
+          parentId: 'evt-001',
+          data: { content: 'Keep this user turn' },
+        },
+        {
+          type: 'assistant.message',
+          id: 'evt-003',
+          timestamp: '2026-04-15T10:00:02.000Z',
+          parentId: 'evt-002',
+          data: { content: 'I will run follow-up commands.' },
+        },
+        ...toolEvents,
+      ],
+    });
+
+    const { extractCopilotContext } = await loadCopilotParserWithHome(fakeHome);
+    const context = await extractCopilotContext(makeSession(sessionDir, 'tail-tool-events-session'));
+
+    expect(context.recentMessages.map((message) => message.content)).toContain('Keep this user turn');
+    expect(context.recentMessages.map((message) => message.content)).toContain('I will run follow-up commands.');
+  });
+
+  it('classifies lowercase create tool executions as writes', async () => {
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'copilot-home-'));
+    const copilotHome = fs.mkdtempSync(path.join(os.tmpdir(), 'copilot-config-'));
+    tmpDirs.push(fakeHome, copilotHome);
+
+    const sessionDir = createCopilotSession({
+      copilotHome,
+      sessionId: 'lowercase-create-session',
+      events: [
+        {
+          type: 'session.start',
+          id: 'evt-001',
+          timestamp: '2026-04-15T10:00:00.000Z',
+          parentId: null,
+          data: { sessionId: 'lowercase-create-session', selectedModel: 'claude-sonnet-4' },
+        },
+        {
+          type: 'tool.execution_start',
+          id: 'evt-002',
+          timestamp: '2026-04-15T10:00:01.000Z',
+          parentId: 'evt-001',
+          data: {
+            toolCallId: 'tool-create',
+            toolName: 'create',
+            arguments: {
+              path: 'src/new-file.ts',
+              file_text: 'export const value = 1;',
+            },
+          },
+        },
+        {
+          type: 'tool.execution_complete',
+          id: 'evt-003',
+          timestamp: '2026-04-15T10:00:02.000Z',
+          parentId: 'evt-002',
+          data: {
+            toolCallId: 'tool-create',
+            success: true,
+            result: { content: 'created' },
+          },
+        },
+      ],
+    });
+
+    const { extractCopilotContext } = await loadCopilotParserWithHome(fakeHome);
+    const context = await extractCopilotContext(makeSession(sessionDir, 'lowercase-create-session'));
+    const createSummary = context.toolSummaries.find((summary) => summary.name === 'create');
+
+    expect(context.filesModified).toContain('src/new-file.ts');
+    expect(createSummary?.samples[0].data).toMatchObject({
+      category: 'write',
+      filePath: 'src/new-file.ts',
+    });
+  });
 });

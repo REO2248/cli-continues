@@ -3,11 +3,11 @@
  */
 
 // Import SessionSource locally (used by UnifiedSession below) and re-export
-import type { SessionSource, ToolSampleCategory } from './tool-names.js';
+import type { SessionSource } from './tool-names.js';
 
 // Re-export shared content block types
 export type { ContentBlock, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock } from './content-blocks.js';
-export { type SessionSource, type ToolSampleCategory, TOOL_NAMES } from './tool-names.js';
+export { isSessionSource, type SessionSource, TOOL_NAMES, type ToolSampleCategory } from './tool-names.js';
 
 /** Unified session metadata */
 export interface UnifiedSession {
@@ -35,6 +35,16 @@ export interface UnifiedSession {
   originalPath: string;
   /** Model used in the session */
   model?: string;
+}
+
+/** Options for session discovery/indexing. Parsers may ignore unsupported filters. */
+export interface SessionParseOptions {
+  /** Restrict discovery to sessions matching this working directory when the storage layout supports it. */
+  cwd?: string;
+  /** Stop after collecting this many sessions when the parser can do so without changing sort semantics. */
+  limit?: number;
+  /** Favor fast picker/list metadata over exact counts or full timestamp scans. */
+  lightweight?: boolean;
 }
 
 /** Conversation message in normalized format */

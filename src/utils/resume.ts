@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { VerbosityConfig } from '../config/index.js';
 import { getPreset, loadConfig } from '../config/index.js';
-import { ToolNotAvailableError } from '../errors.js';
+import { ToolNotAvailableError, UnknownSourceError } from '../errors.js';
 import { logger } from '../logger.js';
 import { ALL_TOOLS, adapters } from '../parsers/registry.js';
 import type { SessionContext, SessionSource, UnifiedSession } from '../types/index.js';
@@ -38,7 +38,8 @@ export function resolveCrossToolForwarding(
   options?: HandoffForwardingOptions,
 ): ForwardResolution {
   const adapter = adapters[target];
-  return resolveTargetForwarding(target, adapter?.mapHandoffFlags, options);
+  if (!adapter) throw new UnknownSourceError(target);
+  return resolveTargetForwarding(target, adapter.mapHandoffFlags, options);
 }
 
 function hasConfigOverride(args: string[], key: string): boolean {
@@ -120,7 +121,7 @@ function resolveHandoffConfig(options?: HandoffContextOptions): VerbosityConfig 
 export async function nativeResume(session: UnifiedSession): Promise<void> {
   const cwd = session.cwd || process.cwd();
   const adapter = adapters[session.source];
-  if (!adapter) throw new Error(`Unknown session source: ${session.source}`);
+  if (!adapter) throw new UnknownSourceError(session.source);
   const binaryName = await requireToolBinaryName(session.source);
   await runCommand(binaryName, adapter.nativeResumeArgs(session), cwd);
 }
@@ -135,6 +136,9 @@ export async function crossToolResume(
   forwarding?: HandoffForwardingOptions,
   contextOptions?: HandoffContextOptions,
 ): Promise<void> {
+  const adapter = adapters[target];
+  if (!adapter) throw new UnknownSourceError(target);
+
   const context = await extractContext(session, resolveHandoffConfig(contextOptions));
   const cwd = session.cwd || process.cwd();
 
@@ -164,9 +168,6 @@ export async function crossToolResume(
     : mode === 'inline'
       ? buildInlinePrompt(context, session)
       : buildReferencePrompt(session);
-
-  const adapter = adapters[target];
-  if (!adapter) throw new Error(`Unknown target: ${target}`);
 
   if (contextOptions?.debugPrompt) {
     console.log(prompt);
@@ -350,9 +351,11 @@ export function getResumeCommand(
   forwarding?: HandoffForwardingOptions,
 ): string {
   const actualTarget = target || session.source;
+  const actualAdapter = adapters[actualTarget];
+  if (!actualAdapter) throw new UnknownSourceError(actualTarget);
 
   if (actualTarget === session.source) {
-    return adapters[session.source].resumeCommandDisplay(session);
+    return actualAdapter.resumeCommandDisplay(session);
   }
 
   const resolved = resolveCrossToolForwarding(actualTarget, forwarding);

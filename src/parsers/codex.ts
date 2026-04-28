@@ -7,17 +7,20 @@ import type {
   ConversationMessage,
   SessionContext,
   SessionNotes,
+  SessionParseOptions,
   ToolUsageSummary,
   UnifiedSession,
 } from '../types/index.js';
 import type { CodexMessage, CodexSessionMeta } from '../types/schemas.js';
 import { countDiffStats, extractStdoutTail } from '../utils/diff.js';
-import { findFiles } from '../utils/fs-helpers.js';
+import { findFiles, mapConcurrent } from '../utils/fs-helpers.js';
 import { getFileStats, readJsonlFile, scanJsonlHead } from '../utils/jsonl.js';
 import { generateHandoffMarkdown } from '../utils/markdown.js';
 import { cleanSummary, extractRepo, homeDir } from '../utils/parser-helpers.js';
+import { matchesCwd } from '../utils/slug.js';
 import {
   extractExitCode,
+  fileSummary,
   mcpSummary,
   SummaryCollector,
   searchSummary,
@@ -103,31 +106,31 @@ function parseFilename(filename: string): { timestamp: Date; id: string } | null
 /**
  * Parse all Codex sessions
  */
-export async function parseCodexSessions(): Promise<UnifiedSession[]> {
+export async function parseCodexSessions(options: SessionParseOptions = {}): Promise<UnifiedSession[]> {
   const files = await findSessionFiles();
-  const sessionsById = new Map<string, UnifiedSession>();
-
-  for (const filePath of files) {
+  const parsedSessions = await mapConcurrent(files, 16, async (filePath): Promise<UnifiedSession | null> => {
     try {
       const filename = path.basename(filePath);
       const parsed = parseFilename(filename);
-      if (!parsed) continue;
+      if (!parsed) return null;
 
       const { meta, firstUserMessage } = await parseSessionInfo(filePath);
       const fileStats = fs.statSync(filePath);
       const stats =
-        fileStats.size > MAX_EXACT_LINE_COUNT_BYTES
+        options.lightweight || fileStats.size > MAX_EXACT_LINE_COUNT_BYTES
           ? { lines: 0, bytes: fileStats.size }
           : await getFileStats(filePath);
 
       const cwd = meta?.payload?.cwd || '';
+      if (options.cwd && cwd && !matchesCwd(cwd, options.cwd)) return null;
+
       const gitUrl = meta?.payload?.git?.repository_url;
       const branch = meta?.payload?.git?.branch;
       const repo = extractRepo({ gitUrl, cwd });
 
       const summary = cleanSummary(firstUserMessage);
 
-      const nextSession: UnifiedSession = {
+      return {
         id: parsed.id,
         source: 'codex',
         cwd,
@@ -140,18 +143,24 @@ export async function parseCodexSessions(): Promise<UnifiedSession[]> {
         originalPath: filePath,
         summary: summary || undefined,
       };
-
-      const existing = sessionsById.get(nextSession.id);
-      if (!existing || existing.updatedAt.getTime() < nextSession.updatedAt.getTime()) {
-        sessionsById.set(nextSession.id, nextSession);
-      }
     } catch (err) {
       logger.debug('codex: skipping unparseable session', filePath, err);
       // Skip files we can't parse
+      return null;
+    }
+  });
+
+  const sessionsById = new Map<string, UnifiedSession>();
+  for (const nextSession of parsedSessions) {
+    if (!nextSession) continue;
+    const existing = sessionsById.get(nextSession.id);
+    if (!existing || existing.updatedAt.getTime() < nextSession.updatedAt.getTime()) {
+      sessionsById.set(nextSession.id, nextSession);
     }
   }
 
-  return Array.from(sessionsById.values()).sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+  const sorted = Array.from(sessionsById.values()).sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+  return options.limit ? sorted.slice(0, options.limit) : sorted;
 }
 
 /**
@@ -190,6 +199,10 @@ const COMMON_SHELL_TOOLS = new Set([
   'bun',
   'deno',
 ]);
+
+function isCodexEditTool(name: string): boolean {
+  return name === 'edit_file' || name.endsWith('__edit_file');
+}
 
 /**
  * Track file modifications from shell command patterns (sed -i, >, tee, mv, cp)
@@ -251,8 +264,10 @@ function extractToolData(
       // function_call
       if (payload.type === 'function_call' && payload.arguments) {
         try {
-          const args = JSON.parse(payload.arguments);
-          const name = payload.name || '';
+          const args = JSON.parse(payload.arguments) as Record<string, unknown>;
+          const rawName = payload.name || '';
+          const namespace = typeof payload.namespace === 'string' ? payload.namespace : '';
+          const name = namespace && !rawName.startsWith(namespace) ? `${namespace}${rawName}` : rawName;
           const output = payload.call_id ? outputsById.get(payload.call_id) : undefined;
 
           if (name === 'exec_command' || name === 'shell_command') {
@@ -275,7 +290,20 @@ function extractToolData(
             });
             trackShellFileWrites(cmd, collector);
           } else if (name === 'write_stdin') {
-            collector.add('write_stdin', `stdin: "${truncate(String(args.input || args.data || ''), 60)}"`);
+            const stdin = String(args.chars ?? args.input ?? args.data ?? '');
+            collector.add('write_stdin', `stdin: "${truncate(stdin, 60)}"`);
+          } else if (isCodexEditTool(name)) {
+            const filePath = String(args.path ?? args.file_path ?? '');
+            const displayPath = filePath || '(unknown)';
+            const codeEdit = typeof args.code_edit === 'string' ? args.code_edit : undefined;
+            collector.add(name, withResult(fileSummary('edit', displayPath), output), {
+              data: {
+                category: 'edit',
+                filePath: displayPath,
+                ...(codeEdit ? { diff: codeEdit } : {}),
+              },
+              ...(filePath ? { filePath, isWrite: true } : {}),
+            });
           } else if (['read_mcp_resource', 'list_mcp_resources', 'list_mcp_resource_templates'].includes(name)) {
             collector.add(
               'mcp-resource',
@@ -375,6 +403,12 @@ function extractToolData(
 /**
  * Extract session notes from reasoning events, model, and token usage
  */
+function extractCodexCompactedText(payload: { message?: string } | undefined): string {
+  if (!payload) return '';
+  if (typeof payload.message === 'string' && payload.message.trim()) return payload.message;
+  return '';
+}
+
 function extractSessionNotes(messages: CodexMessage[]): SessionNotes {
   const notes: SessionNotes = {};
   const reasoning: string[] = [];
@@ -396,6 +430,12 @@ function extractSessionNotes(messages: CodexMessage[]): SessionNotes {
     // Model from turn_context
     if (msg.type === 'turn_context') {
       if (msg.payload?.model && !notes.model) notes.model = msg.payload.model;
+    }
+
+    if (msg.type === 'compacted') {
+      const summary = extractCodexCompactedText(msg.payload);
+      if (summary) notes.compactSummary = truncate(summary, 500);
+      continue;
     }
 
     if (msg.type !== 'event_msg') continue;

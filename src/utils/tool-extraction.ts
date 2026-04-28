@@ -2,6 +2,9 @@
  * Shared tool extraction for parsers using Anthropic-style content blocks
  * (tool_use / tool_result). Used by Claude, Droid, and Cursor parsers.
  */
+
+import type { VerbosityConfig } from '../config/index.js';
+import { getPreset } from '../config/index.js';
 import type {
   AskSampleData,
   EditSampleData,
@@ -13,13 +16,10 @@ import type {
   ReasoningSampleData,
   SearchSampleData,
   ShellSampleData,
-  StructuredToolSample,
   TaskSampleData,
   ToolUsageSummary,
   WriteSampleData,
 } from '../types/index.js';
-import type { VerbosityConfig } from '../config/index.js';
-import { getPreset } from '../config/index.js';
 import {
   ASK_TOOLS,
   EDIT_TOOLS,
@@ -144,7 +144,7 @@ export function extractAnthropicToolData(
       const entry = tu.id ? toolResultMap.get(tu.id) : undefined;
       const result = entry?.text;
       const isError = entry?.isError ?? false;
-      const fp = (input.file_path as string) || (input.path as string) || '';
+      const fp = getInputString(input, 'file_path') || getInputString(input, 'path');
 
       if (SHELL_TOOLS.has(name)) {
         const cmd = (input.command as string) || (input.cmd as string) || '';
@@ -179,11 +179,11 @@ export function extractAnthropicToolData(
           filePath: fp,
         });
       } else if (WRITE_TOOLS.has(name)) {
-        const content = (input.content as string) || '';
+        const content = getInputString(input, 'content') || getInputString(input, 'file_text');
         let diff: string | undefined;
         let diffStats: { added: number; removed: number } | undefined;
         // Derive isNewFile from context: tool name hints, result text, or leave undefined
-        const isNewFile = ['Create', 'create_file'].includes(name)
+        const isNewFile = ['Create', 'create', 'create_file'].includes(name)
           ? true
           : result && /\b(created|new file|overwr)/i.test(result)
             ? /\b(created|new file)\b/i.test(result)
@@ -211,31 +211,39 @@ export function extractAnthropicToolData(
           isError,
         });
       } else if (EDIT_TOOLS.has(name)) {
-        const oldStr = (input.old_string as string) || '';
-        const newStr = (input.new_string as string) || '';
+        const oldStr = getInputString(input, 'old_string') || getInputString(input, 'old_str');
+        const newStr = getInputString(input, 'new_string') || getInputString(input, 'new_str');
+        const patchText =
+          getInputString(input, 'input') || getInputString(input, 'patch') || getInputString(input, 'content');
+        const patchFiles = patchText ? extractPatchFilePaths(patchText) : [];
+        const targetPath = fp || patchFiles[0] || '';
         let diff: string | undefined;
         let diffStats: { added: number; removed: number } | undefined;
 
         if (oldStr || newStr) {
-          const diffResult = formatEditDiff(oldStr, newStr, fp, 200);
+          const diffResult = formatEditDiff(oldStr, newStr, targetPath, 200);
           diff = diffResult.diff;
+          diffStats = countDiffStats(diff);
+        } else if (patchText && patchFiles.length > 0) {
+          diff = truncate(patchText, config.edit.maxChars);
           diffStats = countDiffStats(diff);
         }
 
         const editErrorMsg = isError && result ? result.slice(0, config.edit.maxChars) : undefined;
         const data: EditSampleData = {
           category: 'edit',
-          filePath: fp,
+          filePath: targetPath,
           ...(diff ? { diff } : {}),
           ...(diffStats ? { diffStats } : {}),
           ...(editErrorMsg ? { errorMessage: editErrorMsg } : {}),
         };
-        collector.add(name, withResult(fileSummary('edit', fp, diffStats), result?.slice(0, 80)), {
+        collector.add(name, withResult(fileSummary('edit', targetPath, diffStats), result?.slice(0, 80)), {
           data,
-          filePath: fp,
+          filePath: targetPath,
           isWrite: true,
           isError,
         });
+        for (const patchFile of patchFiles) collector.trackFile(patchFile);
       } else if (GREP_TOOLS.has(name)) {
         const pattern = (input.pattern as string) || (input.query as string) || '';
         const targetPath = (input.path as string) || '';
@@ -308,11 +316,12 @@ export function extractAnthropicToolData(
           const thought = truncate((input.thought as string) || '', maxChars);
           const outcome = truncate((input.outcome as string) || '', maxChars);
           const rawNextAction = input.next_action;
-          const nextAction = typeof rawNextAction === 'string'
-            ? truncate(rawNextAction, maxChars)
-            : rawNextAction
-              ? truncate(JSON.stringify(rawNextAction), maxChars)
-              : undefined;
+          const nextAction =
+            typeof rawNextAction === 'string'
+              ? truncate(rawNextAction, maxChars)
+              : rawNextAction
+                ? truncate(JSON.stringify(rawNextAction), maxChars)
+                : undefined;
           const stepNumber = typeof input.step_number === 'number' ? input.step_number : undefined;
 
           const data: ReasoningSampleData = {
@@ -333,16 +342,11 @@ export function extractAnthropicToolData(
             ...(params ? { params } : {}),
             ...(result ? { result: result.slice(0, config.mcp.resultChars) } : {}),
           };
-          collector.add(name, mcpSummary(name, JSON.stringify(input).slice(0, config.mcp.paramChars), result?.slice(0, 80)), { data });
-
-          // Some MCP tools mutate local files (e.g. mcp__morph__edit_file).
-          // Track those paths in filesModified so handoff reflects all edits.
-          if (name === 'mcp__morph__edit_file') {
-            const mcpPath = (input.path as string) || (input.file_path as string) || '';
-            if (mcpPath) {
-              collector.trackFile(mcpPath);
-            }
-          }
+          collector.add(
+            name,
+            mcpSummary(name, JSON.stringify(input).slice(0, config.mcp.paramChars), result?.slice(0, 80)),
+            { data },
+          );
         }
       } else {
         // Generic/unknown tool — treat as MCP-like
@@ -353,9 +357,13 @@ export function extractAnthropicToolData(
           ...(params ? { params } : {}),
           ...(result ? { result: result.slice(0, config.mcp.resultChars) } : {}),
         };
-        collector.add(name, withResult(`${name}(${JSON.stringify(input).slice(0, config.mcp.paramChars)})`, result?.slice(0, 80)), {
-          data,
-        });
+        collector.add(
+          name,
+          withResult(`${name}(${JSON.stringify(input).slice(0, config.mcp.paramChars)})`, result?.slice(0, 80)),
+          {
+            data,
+          },
+        );
       }
     }
   }
@@ -370,11 +378,29 @@ export function isThinkingTool(name: string): boolean {
   return name.toLowerCase().includes('think');
 }
 
+function getInputString(input: Record<string, unknown>, key: string): string {
+  const value = input[key];
+  return typeof value === 'string' ? value : '';
+}
+
+function extractPatchFilePaths(patch: string): string[] {
+  const paths = new Set<string>();
+  for (const line of patch.split('\n')) {
+    const match =
+      line.match(/^\*\*\* (?:Add|Update|Delete) File: ([^\t\r\n]+)/) ||
+      line.match(/^[-+]{3}\s+(?:[ab]\/)?([^\t\r\n]+)/);
+    if (!match?.[1]) continue;
+    const filePath = match[1].trim();
+    if (filePath && filePath !== '/dev/null') paths.add(filePath);
+  }
+  return Array.from(paths);
+}
+
 /** Truncate each param value to maxChars and format as compact string */
 function truncateParams(input: Record<string, unknown>, maxChars = 100): string {
   const parts: string[] = [];
   for (const [key, val] of Object.entries(input)) {
-    const str = typeof val === 'string' ? val : JSON.stringify(val) ?? '';
+    const str = typeof val === 'string' ? val : (JSON.stringify(val) ?? '');
     parts.push(`${key}=${truncate(str, maxChars)}`);
   }
   return parts.join(', ');
@@ -382,19 +408,15 @@ function truncateParams(input: Record<string, unknown>, maxChars = 100): string 
 
 /** Parse match count from grep result text — returns undefined if ambiguous */
 function parseMatchCount(result: string): number | undefined {
-  const m =
-    result.match(/(?:found|matched)\s+(\d+)/i) ||
-    result.match(/(\d+)\s+(?:match|result|hit)/i);
-  if (m) return parseInt(m[1]);
+  const m = result.match(/(?:found|matched)\s+(\d+)/i) || result.match(/(\d+)\s+(?:match|result|hit)/i);
+  if (m) return parseInt(m[1], 10);
   return undefined;
 }
 
 /** Parse file count from glob result text — returns undefined if ambiguous */
 function parseFileCount(result: string): number | undefined {
-  const m =
-    result.match(/(?:found|returned)\s+(\d+)/i) ||
-    result.match(/(\d+)\s+(?:file|match|result|entr)/i);
-  if (m) return parseInt(m[1]);
+  const m = result.match(/(?:found|returned)\s+(\d+)/i) || result.match(/(\d+)\s+(?:file|match|result|entr)/i);
+  if (m) return parseInt(m[1], 10);
   return undefined;
 }
 
