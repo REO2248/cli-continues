@@ -309,6 +309,89 @@ describe('crush parser', () => {
     fixture.cleanup();
   });
 
+  it('does not mark failed write and edit tool results as modified files', async () => {
+    const fixture = createCrushFixture();
+    useFixtureDb(fixture);
+    insertSession(fixture, { id: 'failed-mutations' });
+    insertMessage(fixture, {
+      id: 'failed-user',
+      sessionId: 'failed-mutations',
+      role: 'user',
+      parts: textPart('Try to update two files.'),
+      createdAt: 1_734_000_010,
+    });
+    insertMessage(fixture, {
+      id: 'failed-assistant',
+      sessionId: 'failed-mutations',
+      role: 'assistant',
+      parts: [
+        {
+          type: 'tool_call',
+          data: {
+            id: 'failed-write',
+            name: 'write',
+            input: '{"file_path":"src/write-target.ts","content":"broken"}',
+            finished: true,
+          },
+        },
+        {
+          type: 'tool_call',
+          data: {
+            id: 'failed-edit',
+            name: 'edit',
+            input: '{"file_path":"src/edit-target.ts","old_string":"old","new_string":"new"}',
+            finished: true,
+          },
+        },
+      ],
+      createdAt: 1_734_000_020,
+    });
+    insertMessage(fixture, {
+      id: 'failed-tool-results',
+      sessionId: 'failed-mutations',
+      role: 'tool',
+      parts: [
+        {
+          type: 'tool_result',
+          data: {
+            tool_call_id: 'failed-write',
+            name: 'write',
+            content: 'permission denied',
+            is_error: true,
+          },
+        },
+        {
+          type: 'tool_result',
+          data: {
+            tool_call_id: 'failed-edit',
+            name: 'edit',
+            content: 'old_string not found',
+            is_error: true,
+          },
+        },
+      ],
+      createdAt: 1_734_000_030,
+    });
+
+    const sessions = await parseCrushSessions();
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.id).toBe('failed-mutations');
+
+    const context = await extractCrushContext(sessions[0]);
+
+    expect(context.filesModified).toEqual([]);
+    expect(context.toolSummaries.find((summary) => summary.name === 'write')).toMatchObject({
+      count: 1,
+      errorCount: 1,
+    });
+    expect(context.toolSummaries.find((summary) => summary.name === 'edit')).toMatchObject({
+      count: 1,
+      errorCount: 1,
+    });
+
+    fixture.cleanup();
+  });
+
   it('discovers the nearest ancestor .crush database for a cwd filter', async () => {
     const fixture = createCrushFixture();
     clearCrushDiscoveryEnv(fixture.root);

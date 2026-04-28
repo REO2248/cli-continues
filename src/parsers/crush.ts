@@ -950,6 +950,7 @@ function addToolSummary(
   const args = parseToolInput(call.input);
   const resultText = toolResultPreview(result);
   const filePath = firstString(args, ['file_path', 'filePath', 'path', 'filename']);
+  const shouldTrackFileMutation = Boolean(filePath) && result?.isError !== true;
 
   switch (category) {
     case 'shell': {
@@ -970,7 +971,7 @@ function addToolSummary(
       collector.add(call.name, fileSummary('write', filePath || '(unknown file)', undefined, false), {
         data: { category: 'write', filePath: filePath || '(unknown file)' },
         filePath,
-        isWrite: Boolean(filePath),
+        isWrite: shouldTrackFileMutation,
         isError: result?.isError,
       });
       break;
@@ -978,7 +979,7 @@ function addToolSummary(
       collector.add(call.name, fileSummary('edit', filePath || '(unknown file)'), {
         data: { category: 'edit', filePath: filePath || '(unknown file)' },
         filePath,
-        isWrite: Boolean(filePath),
+        isWrite: shouldTrackFileMutation,
         isError: result?.isError,
       });
       break;
