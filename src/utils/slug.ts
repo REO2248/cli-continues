@@ -10,7 +10,8 @@ import { IS_WINDOWS } from './platform.js';
  * Validates candidates with fs.existsSync(). Falls back to naive slash replacement.
  */
 export function cwdFromSlug(slug: string): string {
-  const parts = slug.split('-');
+  const normalized = slug.startsWith('-') ? slug.slice(1) : slug;
+  const parts = normalized.split('-');
   let best: string | null = null;
   const isDriveSlug = parts.length > 0 && /^[A-Za-z]$/.test(parts[0] || '');
 
@@ -55,6 +56,10 @@ export function cwdFromSlug(slug: string): string {
 
       // Option 3: keep as literal dash (e.g. laravel-contentai)
       resolve(idx + 1, [...rest, last + '-' + part]);
+      if (best) return;
+
+      // Option 4: treat dash as underscore (e.g. libktts-workspace → libktts_workspace)
+      resolve(idx + 1, [...rest, last + '_' + part]);
     }
   }
 
@@ -67,7 +72,13 @@ export function cwdFromSlug(slug: string): string {
     return rest ? `${drive}:/${rest}` : `${drive}:/`;
   }
 
-  return '/' + slug.replace(/-/g, '/');
+  if (isDriveSlug && !IS_WINDOWS) {
+    const fallback = '/' + parts.join('/');
+    if (fs.existsSync(fallback)) return fallback;
+  }
+
+  const fallback = '/' + normalized.replace(/-/g, '/');
+  return fs.existsSync(fallback) ? fallback : '';
 }
 
 /**
