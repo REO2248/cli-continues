@@ -73,6 +73,60 @@ describe('cross-tool forwarding', () => {
     expect(resolved.passthroughArgs).toEqual([]);
   });
 
+  it('maps mimo-code yolo into --dangerously-skip-permissions', () => {
+    const resolved = resolveCrossToolForwarding('mimo-code', {
+      rawArgs: ['--yolo'],
+    });
+
+    expect(resolved.mappedArgs).toEqual(['--dangerously-skip-permissions']);
+    expect(resolved.passthroughArgs).toEqual([]);
+  });
+
+  it('maps mimo-code approval-mode yolo into --dangerously-skip-permissions', () => {
+    const resolved = resolveCrossToolForwarding('mimo-code', {
+      rawArgs: ['--approval-mode', 'yolo'],
+    });
+
+    expect(resolved.mappedArgs).toEqual(['--dangerously-skip-permissions']);
+    expect(resolved.passthroughArgs).toEqual([]);
+  });
+
+  it('maps mimo-code ask-for-approval never into --dangerously-skip-permissions', () => {
+    const resolved = resolveCrossToolForwarding('mimo-code', {
+      rawArgs: ['--ask-for-approval', 'never'],
+    });
+
+    expect(resolved.mappedArgs).toEqual(['--dangerously-skip-permissions']);
+    expect(resolved.passthroughArgs).toEqual([]);
+  });
+
+  it('maps mimo-code model and agent flags', () => {
+    const resolved = resolveCrossToolForwarding('mimo-code', {
+      rawArgs: ['--model', 'mimo-auto', '--agent', 'main'],
+    });
+
+    expect(resolved.mappedArgs).toEqual(['--model', 'mimo-auto', '--agent', 'main']);
+    expect(resolved.passthroughArgs).toEqual([]);
+  });
+
+  it('maps mimo-code workspace into --dir', () => {
+    const resolved = resolveCrossToolForwarding('mimo-code', {
+      rawArgs: ['--workspace', '/tmp/project'],
+    });
+
+    expect(resolved.mappedArgs).toEqual(['--dir', '/tmp/project']);
+    expect(resolved.passthroughArgs).toEqual([]);
+  });
+
+  it('warns on unsupported mimo-code approval-mode values', () => {
+    const resolved = resolveCrossToolForwarding('mimo-code', {
+      rawArgs: ['--approval-mode', 'plan'],
+    });
+
+    expect(resolved.mappedArgs).toEqual([]);
+    expect(resolved.warnings.length).toBeGreaterThan(0);
+  });
+
   it('maps kimi allow-all forwarding into --yolo and preserves mapped args', () => {
     const resolved = resolveCrossToolForwarding('kimi', {
       rawArgs: ['--allow-all', '--add-dir', '/tmp/workspace', '--model', 'kimi-k2.5'],
