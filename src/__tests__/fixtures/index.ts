@@ -483,6 +483,184 @@ export function createOpenCodeSqliteFixture(): FixtureDir {
 }
 
 /**
+ * Create a temporary SQLite database with MiMo-Code session fixtures.
+ * MiMo-Code shares the same SQLite schema as OpenCode (project, session, message, part tables).
+ */
+export function createMiMoCodeSqliteFixture(dbFileName?: string): FixtureDir {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'test-mimo-code-'));
+  const dbPath = path.join(root, dbFileName ?? 'mimocode.db');
+
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(dbPath);
+
+  db.exec(`
+    CREATE TABLE project (
+      id TEXT PRIMARY KEY,
+      worktree TEXT NOT NULL,
+      vcs TEXT,
+      name TEXT,
+      icon_url TEXT,
+      icon_color TEXT,
+      time_created INTEGER NOT NULL,
+      time_updated INTEGER NOT NULL,
+      time_initialized INTEGER,
+      sandboxes TEXT NOT NULL DEFAULT '[]',
+      commands TEXT
+    );
+    CREATE TABLE session (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      parent_id TEXT,
+      slug TEXT NOT NULL,
+      directory TEXT NOT NULL,
+      title TEXT NOT NULL,
+      version TEXT NOT NULL,
+      share_url TEXT,
+      summary_additions INTEGER,
+      summary_deletions INTEGER,
+      summary_files INTEGER,
+      summary_diffs TEXT,
+      revert TEXT,
+      permission TEXT,
+      time_created INTEGER NOT NULL,
+      time_updated INTEGER NOT NULL,
+      time_compacting INTEGER,
+      time_archived INTEGER,
+      FOREIGN KEY (project_id) REFERENCES project(id)
+    );
+    CREATE TABLE message (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      time_created INTEGER NOT NULL,
+      time_updated INTEGER NOT NULL,
+      data TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES session(id)
+    );
+    CREATE TABLE part (
+      id TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      time_created INTEGER NOT NULL,
+      time_updated INTEGER NOT NULL,
+      data TEXT NOT NULL,
+      FOREIGN KEY (message_id) REFERENCES message(id)
+    );
+  `);
+
+  const now = Date.now();
+
+  db.prepare('INSERT INTO project VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+    'proj_mimo1',
+    '/home/user/project',
+    'git',
+    'project',
+    null,
+    null,
+    now - 10000,
+    now,
+    null,
+    '[]',
+    null,
+  );
+
+  db.prepare('INSERT INTO session VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+    'ses_mimo1',
+    'proj_mimo1',
+    null,
+    'test-mimo-session',
+    '/home/user/project',
+    'Fix authentication bug',
+    '1.0.0',
+    null,
+    2,
+    0,
+    1,
+    null,
+    null,
+    null,
+    now - 5000,
+    now,
+    null,
+    null,
+  );
+
+  db.prepare('INSERT INTO message VALUES (?, ?, ?, ?, ?)').run(
+    'msg_mimo_user1',
+    'ses_mimo1',
+    now - 4000,
+    now - 4000,
+    JSON.stringify({ role: 'user', time: { created: now - 4000 } }),
+  );
+  db.prepare('INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)').run(
+    'prt_mimo_user1',
+    'msg_mimo_user1',
+    'ses_mimo1',
+    now - 4000,
+    now - 4000,
+    JSON.stringify({ type: 'text', text: 'Fix the authentication bug in login.ts' }),
+  );
+
+  db.prepare('INSERT INTO message VALUES (?, ?, ?, ?, ?)').run(
+    'msg_mimo_asst1',
+    'ses_mimo1',
+    now - 3000,
+    now - 3000,
+    JSON.stringify({
+      role: 'assistant',
+      time: { created: now - 3000, completed: now - 2500 },
+      modelID: 'mimo-auto',
+    }),
+  );
+  db.prepare('INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)').run(
+    'prt_mimo_asst1',
+    'msg_mimo_asst1',
+    'ses_mimo1',
+    now - 3000,
+    now - 3000,
+    JSON.stringify({ type: 'text', text: 'I found the issue in login.ts. The token validation was missing.' }),
+  );
+
+  db.prepare('INSERT INTO message VALUES (?, ?, ?, ?, ?)').run(
+    'msg_mimo_user2',
+    'ses_mimo1',
+    now - 2000,
+    now - 2000,
+    JSON.stringify({ role: 'user', time: { created: now - 2000 } }),
+  );
+  db.prepare('INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)').run(
+    'prt_mimo_user2',
+    'msg_mimo_user2',
+    'ses_mimo1',
+    now - 2000,
+    now - 2000,
+    JSON.stringify({ type: 'text', text: 'Great, please also add error handling' }),
+  );
+
+  db.prepare('INSERT INTO message VALUES (?, ?, ?, ?, ?)').run(
+    'msg_mimo_asst2',
+    'ses_mimo1',
+    now - 1000,
+    now - 1000,
+    JSON.stringify({ role: 'assistant', time: { created: now - 1000, completed: now - 500 } }),
+  );
+  db.prepare('INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)').run(
+    'prt_mimo_asst2',
+    'msg_mimo_asst2',
+    'ses_mimo1',
+    now - 1000,
+    now - 1000,
+    JSON.stringify({ type: 'text', text: 'Done. I added try-catch blocks and proper error messages.' }),
+  );
+
+  db.close();
+
+  return {
+    root,
+    cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
+  };
+}
+
+/**
  * Create a temporary `.crush/crush.db` SQLite fixture matching the schema the
  * Crush parser introspects (see src/parsers/crush.ts). The fixture lives under
  * `<root>/project/.crush/crush.db` so cwd-ancestor discovery resolves the

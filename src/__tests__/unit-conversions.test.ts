@@ -23,6 +23,7 @@ import {
   createKiloCodeFixture,
   createKimiFixture,
   createKiroFixture,
+  createMiMoCodeSqliteFixture,
   createOpenCodeSqliteFixture,
   createQwenCodeFixture,
   createRooCodeFixture,
@@ -192,6 +193,44 @@ function parseCrushFixtureMessages(dbPath: string, sessionId: string): Conversat
 }
 
 function parseOpenCodeFixtureMessages(dbPath: string, sessionId: string): ConversationMessage[] {
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(dbPath, { open: true, readOnly: true });
+  const messages: ConversationMessage[] = [];
+
+  try {
+    const msgRows = db
+      .prepare('SELECT id, session_id, time_created, data FROM message WHERE session_id = ? ORDER BY time_created ASC')
+      .all(sessionId) as any[];
+
+    for (const msgRow of msgRows) {
+      const msgData = JSON.parse(msgRow.data);
+      const role = msgData.role === 'user' ? 'user' : 'assistant';
+
+      const partRows = db
+        .prepare('SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC')
+        .all(msgRow.id) as any[];
+
+      let text = '';
+      for (const partRow of partRows) {
+        const partData = JSON.parse(partRow.data);
+        if (partData.type === 'text' && partData.text) text += partData.text + '\n';
+      }
+
+      if (text.trim()) {
+        messages.push({
+          role: role as 'user' | 'assistant',
+          content: text.trim(),
+          timestamp: new Date(msgRow.time_created),
+        });
+      }
+    }
+  } finally {
+    db.close();
+  }
+  return messages;
+}
+
+function parseMiMoCodeFixtureMessages(dbPath: string, sessionId: string): ConversationMessage[] {
   const { DatabaseSync } = require('node:sqlite');
   const db = new DatabaseSync(dbPath, { open: true, readOnly: true });
   const messages: ConversationMessage[] = [];
@@ -460,6 +499,7 @@ beforeAll(() => {
   fixtures.antigravity = createAntigravityFixture();
   fixtures['qwen-code'] = createQwenCodeFixture();
   fixtures.crush = createCrushFixture();
+  fixtures['mimo-code'] = createMiMoCodeSqliteFixture();
 
   // Build contexts from fixtures
   const now = new Date();
@@ -595,6 +635,30 @@ beforeAll(() => {
     pendingTasks: [],
     toolSummaries: [],
     markdown: generateHandoffMarkdown(opencodeSession, opencodeMsgs, [], [], []),
+  };
+
+  // MiMo-Code (SQLite)
+  const mimocodeDbPath = path.join(fixtures['mimo-code'].root, 'mimocode.db');
+  const mimocodeSession: UnifiedSession = {
+    id: 'ses_mimo1',
+    source: 'mimo-code',
+    cwd: '/home/user/project',
+    repo: 'user/project',
+    lines: 4,
+    bytes: 0,
+    createdAt: now,
+    updatedAt: now,
+    originalPath: mimocodeDbPath,
+    summary: 'Fix auth bug',
+  };
+  const mimocodeMsgs = parseMiMoCodeFixtureMessages(mimocodeDbPath, 'ses_mimo1');
+  contexts['mimo-code'] = {
+    session: mimocodeSession,
+    recentMessages: mimocodeMsgs,
+    filesModified: [],
+    pendingTasks: [],
+    toolSummaries: [],
+    markdown: generateHandoffMarkdown(mimocodeSession, mimocodeMsgs, [], [], []),
   };
 
   // Droid
@@ -995,6 +1059,22 @@ describe('Low-Level Fixture Parsing', () => {
 
   it('OpenCode SQLite: messages are ordered chronologically', () => {
     const msgs = contexts.opencode.recentMessages;
+    for (let i = 1; i < msgs.length; i++) {
+      expect(msgs[i].timestamp!.getTime()).toBeGreaterThanOrEqual(msgs[i - 1].timestamp!.getTime());
+    }
+  });
+
+  it('MiMo-Code SQLite: extracts messages via message+part join', () => {
+    const msgs = contexts['mimo-code'].recentMessages;
+    expect(msgs.length).toBe(4);
+    expect(msgs[0].role).toBe('user');
+    expect(msgs[0].content).toContain('Fix the authentication bug');
+    expect(msgs[1].role).toBe('assistant');
+    expect(msgs[3].role).toBe('assistant');
+  });
+
+  it('MiMo-Code SQLite: messages are ordered chronologically', () => {
+    const msgs = contexts['mimo-code'].recentMessages;
     for (let i = 1; i < msgs.length; i++) {
       expect(msgs[i].timestamp!.getTime()).toBeGreaterThanOrEqual(msgs[i - 1].timestamp!.getTime());
     }

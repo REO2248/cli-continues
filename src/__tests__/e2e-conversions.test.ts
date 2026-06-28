@@ -29,6 +29,7 @@ import {
   extractKiloCodeContext,
   extractKimiContext,
   extractKiroContext,
+  extractMiMoCodeContext,
   extractOpenCodeContext,
   extractQwenCodeContext,
   extractRooCodeContext,
@@ -45,6 +46,7 @@ import {
   parseKiloCodeSessions,
   parseKimiSessions,
   parseKiroSessions,
+  parseMiMoCodeSessions,
   parseOpenCodeSessions,
   parseQwenCodeSessions,
   parseRooCodeSessions,
@@ -69,6 +71,7 @@ const ALL_SOURCES: SessionSource[] = [
   'antigravity',
   'kimi',
   'qwen-code',
+  'mimo-code',
 ];
 
 const parsers: Record<SessionSource, () => Promise<UnifiedSession[]>> = {
@@ -88,6 +91,7 @@ const parsers: Record<SessionSource, () => Promise<UnifiedSession[]>> = {
   antigravity: parseAntigravitySessions,
   kimi: parseKimiSessions,
   'qwen-code': parseQwenCodeSessions,
+  'mimo-code': parseMiMoCodeSessions,
 };
 
 const extractors: Record<SessionSource, (s: UnifiedSession) => Promise<SessionContext>> = {
@@ -107,6 +111,7 @@ const extractors: Record<SessionSource, (s: UnifiedSession) => Promise<SessionCo
   antigravity: extractAntigravityContext,
   kimi: extractKimiContext,
   'qwen-code': extractQwenCodeContext,
+  'mimo-code': extractMiMoCodeContext,
 };
 
 // Results directory
@@ -298,6 +303,7 @@ describe('E2E: 20 Cross-Tool Conversion Paths', () => {
           antigravity: 'Antigravity',
           kimi: 'Kimi CLI',
           'qwen-code': 'Qwen Code',
+          'mimo-code': 'MiMo Code',
         };
         const sourceLabel = sourceLabels[source];
 

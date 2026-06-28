@@ -28,6 +28,7 @@ import { extractDroidContext, parseDroidSessions } from './droid.js';
 import { extractGeminiContext, parseGeminiSessions } from './gemini.js';
 import { extractKimiContext, parseKimiSessions } from './kimi.js';
 import { extractKiroContext, parseKiroSessions } from './kiro.js';
+import { extractMiMoCodeContext, parseMiMoCodeSessions } from './mimo-code.js';
 import { extractOpenCodeContext, parseOpenCodeSessions } from './opencode.js';
 import { extractQwenCodeContext, parseQwenCodeSessions } from './qwen-code.js';
 
@@ -666,6 +667,65 @@ function mapCrushFlags(context: ForwardFlagMapContext): ForwardMapResult {
   return { mappedArgs: args, warnings };
 }
 
+function mapMiMoCodeFlags(context: ForwardFlagMapContext): ForwardMapResult {
+  const args: string[] = [];
+  const warnings: string[] = [];
+
+  const autoOccurrences = collectAutoApproveOccurrences(context);
+  const fullAutoOccurrences = context.all('fullAuto');
+  const askOccurrences = context.all('askForApproval');
+  const approvalModeOccurrences = context.all('approvalMode');
+  const askForApproval = context.latestString('askForApproval')?.toLowerCase();
+  const approvalMode = context.latestString('approvalMode')?.toLowerCase();
+
+  const isAutoApprove =
+    autoOccurrences.length > 0 ||
+    fullAutoOccurrences.length > 0 ||
+    askForApproval === 'never' ||
+    approvalMode === 'yolo';
+
+  if (isAutoApprove) {
+    context.consume(
+      ...autoOccurrences,
+      ...fullAutoOccurrences,
+      ...askOccurrences,
+      ...approvalModeOccurrences,
+    );
+    args.push('--dangerously-skip-permissions');
+
+    const permissionOccurrences = context.all('permissionMode');
+    if (permissionOccurrences.length > 0) {
+      context.consume(...permissionOccurrences);
+      warnings.push('MiMo Code: auto-approve flags override permission-mode options.');
+    }
+  } else {
+    if (askOccurrences.length > 0 || approvalModeOccurrences.length > 0) {
+      context.consume(...askOccurrences, ...approvalModeOccurrences);
+      warnings.push('MiMo Code: --ask-for-approval and --approval-mode are not directly supported and were ignored.');
+    }
+  }
+
+  const model = context.latestString('model');
+  if (model) {
+    context.consumeKeys('model');
+    args.push('--model', model);
+  }
+
+  const agent = context.latestString('agent');
+  if (agent) {
+    context.consumeKeys('agent');
+    args.push('--agent', agent);
+  }
+
+  const cwd = context.latestString('workspace', 'cd');
+  if (cwd) {
+    context.consumeKeys('workspace', 'cd');
+    args.push('--dir', cwd);
+  }
+
+  return { mappedArgs: args, warnings };
+}
+
 // ── Claude Code ──────────────────────────────────────────────────────
 register({
   name: 'claude',
@@ -745,6 +805,23 @@ register({
   crossToolArgs: (prompt) => ['run', prompt],
   resumeCommandDisplay: (s) => `opencode --session ${s.id}`,
   mapHandoffFlags: mapOpenCodeFlags,
+});
+
+// ── MiMo Code ────────────────────────────────────────────────────────
+register({
+  name: 'mimo-code',
+  label: 'MiMo Code',
+  color: chalk.hex('#FF8C00'),
+  storagePath: '$MIMOCODE_HOME/data or ~/.local/share/mimocode',
+  envVar: 'MIMOCODE_HOME',
+  extraEnvVars: ['MIMOCODE_DB', 'XDG_DATA_HOME'],
+  binaryName: 'mimo',
+  parseSessions: parseMiMoCodeSessions,
+  extractContext: extractMiMoCodeContext,
+  nativeResumeArgs: (s) => ['run', '--session', s.id],
+  crossToolArgs: (prompt) => ['run', prompt],
+  resumeCommandDisplay: (s) => `mimo run --session ${s.id}`,
+  mapHandoffFlags: mapMiMoCodeFlags,
 });
 
 // ── Factory Droid ────────────────────────────────────────────────────
